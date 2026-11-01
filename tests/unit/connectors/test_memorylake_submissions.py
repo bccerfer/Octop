@@ -9,10 +9,19 @@ from dataclasses import replace
 from tests.support.memorylake import offline_test_guard
 
 from octop.infra.connectors.memorylake.contract import CallerContext, ReadScope
-from octop.infra.connectors.memorylake.runner import MemoryLakeCancelledError, MemoryLakeRunnerError, ProcessResult
+from octop.infra.connectors.memorylake.runner import (
+    MemoryLakeCancelledError,
+    MemoryLakeRunnerError,
+    ProcessResult,
+)
 from octop.infra.connectors.memorylake.submissions import (
-    Approval, FileSnapshot, SubmissionCancelledError, SubmissionError,
-    SubmissionRecord, SubmissionService, WriteBinding,
+    Approval,
+    FileSnapshot,
+    SubmissionCancelledError,
+    SubmissionError,
+    SubmissionRecord,
+    SubmissionService,
+    WriteBinding,
 )
 
 
@@ -31,7 +40,12 @@ class FakeLedger:
 
     async def claim(self, approval_id, intent, now):
         approval = self.approvals[approval_id]
-        if approval_id in self.consumed or approval.revoked or approval.intent != intent or now >= approval.expires_at:
+        if (
+            approval_id in self.consumed
+            or approval.revoked
+            or approval.intent != intent
+            or now >= approval.expires_at
+        ):
             raise ValueError("claim denied")
         self.consumed.add(approval_id)
         record = SubmissionRecord(approval_id, intent)
@@ -50,7 +64,8 @@ class FakeLedger:
             or self.records[previous.submission_id] != previous
             or current != previous.intent.binding
             or not current.writes_enabled
-            or approval.revoked or approval.intent != previous.intent
+            or approval.revoked
+            or approval.intent != previous.intent
             or now >= approval.expires_at
             or previous.state != {"uploading": "approved", "importing": "uploaded"}[phase]
         ):
@@ -80,14 +95,25 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.caller = CallerContext(11, "agent-1", 11, 1)
-        self.binding = WriteBinding(ReadScope("connection-1", 11, "agent-1", "workspace-1", ("project-1",)), "project-1", "folder:1", "https://app.memorylake.ai/openapi/memorylake", 1, True)
+        self.binding = WriteBinding(
+            ReadScope("connection-1", 11, "agent-1", "workspace-1", ("project-1",)),
+            "project-1",
+            "folder:1",
+            "https://app.memorylake.ai/openapi/memorylake",
+            1,
+            True,
+        )
         self.file = FileSnapshot("attachment-1", "demo.txt", b"synthetic example")
         self.reads = 0
         self.calls = []
         self.ledger = FakeLedger()
         self.ledger.binding = lambda: self.binding
         self.upload_reply = ProcessResult(0, b'{"item_id":"file:1"}', b"")
-        self.import_reply = ProcessResult(0, b'{"success_count":1,"failure_count":0,"duplicate_count":0,"details_truncated":false,"details":[{"result":"success","drive_item_id":"file:1","document_id":"doc-1"}]}', b"")
+        self.import_reply = ProcessResult(
+            0,
+            b'{"success_count":1,"failure_count":0,"duplicate_count":0,"details_truncated":false,"details":[{"result":"success","drive_item_id":"file:1","document_id":"doc-1"}]}',
+            b"",
+        )
         self.status = "pending"
         self.observed_binding = None
         self.upload_error = None
@@ -117,12 +143,21 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             async def get_document(self, binding, document_id):
                 outer.observed_binding = binding
                 outer.calls.append("get")
-                return ProcessResult(0, ('{"id":"doc-1","status":"' + outer.status + '"}').encode(), b"")
+                return ProcessResult(
+                    0, ('{"id":"doc-1","status":"' + outer.status + '"}').encode(), b""
+                )
 
         async def load():
             return self.binding
 
-        self.service = SubmissionService("connection-1", load_binding=load, source=Source(), ledger=self.ledger, transport=Transport(), clock=lambda: 100.0)
+        self.service = SubmissionService(
+            "connection-1",
+            load_binding=load,
+            source=Source(),
+            ledger=self.ledger,
+            transport=Transport(),
+            clock=lambda: 100.0,
+        )
         intent = await self.service.prepare(self.caller, "attachment-1")
         self.ledger.approvals["approval-1"] = Approval("approval-1", intent, 200.0)
         self.reads = 0
@@ -142,7 +177,11 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ["upload", "import", "get", "get"])
 
     async def test_identity_and_write_optin_are_checked_before_source_read(self):
-        for caller in (replace(self.caller, user_id=12), replace(self.caller, is_group=True), replace(self.caller, agent_owner_user_id=None)):
+        for caller in (
+            replace(self.caller, user_id=12),
+            replace(self.caller, is_group=True),
+            replace(self.caller, agent_owner_user_id=None),
+        ):
             with self.subTest(caller=caller), self.assertRaises(ValueError):
                 await self.service.submit(caller, "attachment-1", "approval-1")
         self.binding = replace(self.binding, writes_enabled=False)
@@ -152,14 +191,22 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
 
     async def test_changed_content_filename_and_attachment_are_not_approved(self):
-        for snapshot in (replace(self.file, content=b"changed"), replace(self.file, filename="other.txt"), replace(self.file, attachment_id="other")):
+        for snapshot in (
+            replace(self.file, content=b"changed"),
+            replace(self.file, filename="other.txt"),
+            replace(self.file, attachment_id="other"),
+        ):
             self.file = snapshot
             with self.subTest(snapshot=snapshot), self.assertRaises(ValueError):
                 await self.submit()
         self.assertEqual(self.calls, [])
 
     async def test_changed_target_and_credentials_are_not_approved(self):
-        for binding in (replace(self.binding, library_parent_id="another"), replace(self.binding, credential_revision=2), replace(self.binding, scope=replace(self.binding.scope, workspace_id="another"))):
+        for binding in (
+            replace(self.binding, library_parent_id="another"),
+            replace(self.binding, credential_revision=2),
+            replace(self.binding, scope=replace(self.binding.scope, workspace_id="another")),
+        ):
             self.binding = binding
             with self.subTest(binding=binding), self.assertRaises(ValueError):
                 await self.submit()
@@ -178,7 +225,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ["upload", "import"])
 
     async def test_revocation_between_writes_stops_import(self):
-        self.after_upload = lambda: setattr(self, "binding", replace(self.binding, writes_enabled=False))
+        self.after_upload = lambda: setattr(
+            self, "binding", replace(self.binding, writes_enabled=False)
+        )
         with self.assertRaises(ValueError):
             await self.submit()
         self.assertEqual(self.calls, ["upload"])
@@ -213,7 +262,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ["upload", "import"])
 
     async def test_cancelled_upload_keeps_partial_safe_id_and_propagates_cancel(self):
-        self.upload_error = MemoryLakeCancelledError(partial_result=ProcessResult(-9, b'{"item_id":"file:1"}', b"secret"))
+        self.upload_error = MemoryLakeCancelledError(
+            partial_result=ProcessResult(-9, b'{"item_id":"file:1"}', b"secret")
+        )
         with self.assertRaises(SubmissionCancelledError) as caught:
             await self.submit()
         self.assertEqual(caught.exception.evidence.item_id, "file:1")
@@ -281,7 +332,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls.count("import"), 1)
 
     async def test_import_for_another_file_is_unknown_not_processing(self):
-        self.import_reply = replace(self.import_reply, stdout=self.import_reply.stdout.replace(b"file:1", b"file:other"))
+        self.import_reply = replace(
+            self.import_reply, stdout=self.import_reply.stdout.replace(b"file:1", b"file:other")
+        )
         record = await self.submit()
         self.assertEqual(record.state, "unknown")
         self.assertIsNone(record.document_id)
@@ -291,7 +344,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
         release = asyncio.Event()
         original_save = self.ledger.save
-        self.upload_error = MemoryLakeCancelledError(partial_result=ProcessResult(-9, b'{"item_id":"file:1"}', b""))
+        self.upload_error = MemoryLakeCancelledError(
+            partial_result=ProcessResult(-9, b'{"item_id":"file:1"}', b"")
+        )
 
         async def save(previous, updated):
             if updated.state == "unknown":
@@ -312,7 +367,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.evidence.item_id, "file:1")
 
     async def test_cancel_save_failure_carries_safe_evidence(self):
-        self.upload_error = MemoryLakeCancelledError(partial_result=ProcessResult(-9, b'{"item_id":"file:1"}', b"secret"))
+        self.upload_error = MemoryLakeCancelledError(
+            partial_result=ProcessResult(-9, b'{"item_id":"file:1"}', b"secret")
+        )
         self.ledger.fail_state = "unknown"
         with self.assertRaises(SubmissionCancelledError) as caught:
             await self.submit()
@@ -324,7 +381,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_cannot_read_another_users_record(self):
         record = await self.submit()
         self.calls.clear()
-        other = replace(record, intent=replace(record.intent, caller=replace(self.caller, user_id=12)))
+        other = replace(
+            record, intent=replace(record.intent, caller=replace(self.caller, user_id=12))
+        )
         self.ledger.records[record.submission_id] = other
         with self.assertRaisesRegex(SubmissionError, "^submission_access_denied$"):
             await self.service.check_status(self.caller, record.submission_id)
@@ -357,7 +416,11 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ["upload"])
 
     async def test_failed_import_document_reference_does_not_prove_submission_ready(self):
-        self.import_reply = ProcessResult(1, b'{"success_count":0,"failure_count":1,"duplicate_count":0,"details_truncated":false,"details":[{"result":"failed","drive_item_id":"file:1","document_id":"doc-1"}]}', b"")
+        self.import_reply = ProcessResult(
+            1,
+            b'{"success_count":0,"failure_count":1,"duplicate_count":0,"details_truncated":false,"details":[{"result":"failed","drive_item_id":"file:1","document_id":"doc-1"}]}',
+            b"",
+        )
         record = await self.submit()
         self.assertEqual(record.document_id, "doc-1")
         self.status = "okay"
@@ -373,7 +436,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ["upload", "import", "get"])
 
     async def test_endpoint_change_requires_new_approval(self):
-        self.binding = replace(self.binding, base_url="https://app.memorylake.cn/openapi/memorylake")
+        self.binding = replace(
+            self.binding, base_url="https://app.memorylake.cn/openapi/memorylake"
+        )
         with self.assertRaises(ValueError):
             await self.submit()
         self.assertEqual(self.calls, [])
@@ -414,7 +479,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_write_requires_a_durable_step_lease(self):
         await self.submit()
-        self.assertEqual([lease.phase for lease in self.ledger.step_grants], ["uploading", "importing"])
+        self.assertEqual(
+            [lease.phase for lease in self.ledger.step_grants], ["uploading", "importing"]
+        )
 
     async def test_readonly_status_survives_write_disable_and_credential_rotation(self):
         record = await self.submit()
@@ -425,7 +492,12 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ["upload", "import", "get"])
 
     async def test_incomplete_multi_accept_report_cannot_later_claim_ready(self):
-        self.import_reply = replace(self.import_reply, stdout=self.import_reply.stdout.replace(b'"success_count":1', b'"success_count":2').replace(b'"details_truncated":false', b'"details_truncated":true'))
+        self.import_reply = replace(
+            self.import_reply,
+            stdout=self.import_reply.stdout.replace(
+                b'"success_count":1', b'"success_count":2'
+            ).replace(b'"details_truncated":false', b'"details_truncated":true'),
+        )
         record = await self.submit()
         self.assertEqual(record.state, "unknown")
         self.assertEqual(record.document_id, "doc-1")
@@ -454,7 +526,18 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_uses_original_project_with_new_permission_revision(self):
         record = await self.submit()
         self.caller = replace(self.caller, authorization_revision=2)
-        self.binding = replace(self.binding, scope=replace(self.binding.scope, authorization_revision=2, project_ids=("project-1", "new-default")), project_id="new-default", library_parent_id="new-folder", writes_enabled=False, credential_revision=2)
+        self.binding = replace(
+            self.binding,
+            scope=replace(
+                self.binding.scope,
+                authorization_revision=2,
+                project_ids=("project-1", "new-default"),
+            ),
+            project_id="new-default",
+            library_parent_id="new-folder",
+            writes_enabled=False,
+            credential_revision=2,
+        )
         self.status = "okay"
         record = await self.service.check_status(self.caller, record.submission_id)
         self.assertEqual(record.state, "ready")
@@ -467,7 +550,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         original = self.binding
         self.calls.clear()
         for current in (
-            replace(original, scope=replace(original.scope, project_ids=("other",)), project_id="other"),
+            replace(
+                original, scope=replace(original.scope, project_ids=("other",)), project_id="other"
+            ),
             replace(original, scope=replace(original.scope, workspace_id="other")),
             replace(original, base_url="https://app.memorylake.cn/openapi/memorylake"),
         ):
@@ -520,7 +605,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_unknown_status_stops_at_check_limit(self):
         record = await self.submit()
         self.status = "future-status"
-        result = await self.service.poll_status(self.caller, record.submission_id, max_checks=3, interval_s=0.1, sleep=self.no_sleep)
+        result = await self.service.poll_status(
+            self.caller, record.submission_id, max_checks=3, interval_s=0.1, sleep=self.no_sleep
+        )
         self.assertEqual(result.stop_reason, "check_limit")
         self.assertEqual(result.record.state, "unknown")
         self.assertEqual(result.checks, 3)
@@ -541,7 +628,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             return await original(binding, document_id)
 
         self.service._transport.get_document = get
-        result = await self.service.poll_status(self.caller, record.submission_id, interval_s=0.1, sleep=self.no_sleep)
+        result = await self.service.poll_status(
+            self.caller, record.submission_id, interval_s=0.1, sleep=self.no_sleep
+        )
         self.assertEqual(result.stop_reason, "ready")
         self.assertEqual(result.checks, 2)
 
@@ -573,7 +662,14 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         async def sleep(delay):
             now[0] += delay
 
-        result = await self.service.poll_status(self.caller, record.submission_id, timeout_s=1, interval_s=2, sleep=sleep, monotonic=lambda: now[0])
+        result = await self.service.poll_status(
+            self.caller,
+            record.submission_id,
+            timeout_s=1,
+            interval_s=2,
+            sleep=sleep,
+            monotonic=lambda: now[0],
+        )
         self.assertEqual(result.stop_reason, "timeout")
         self.assertIsNone(result.record)
         self.assertEqual(result.checks, 1)
@@ -594,23 +690,44 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_terminal_failed_and_ready_are_idempotent(self):
         record = await self.submit()
         self.status = "error"
-        result = await self.service.poll_status(self.caller, record.submission_id, interval_s=0.1, sleep=self.no_sleep)
+        result = await self.service.poll_status(
+            self.caller, record.submission_id, interval_s=0.1, sleep=self.no_sleep
+        )
         self.assertEqual(result.stop_reason, "failed")
         count = self.calls.count("get")
-        again = await self.service.poll_status(self.caller, record.submission_id, interval_s=0.1, sleep=self.no_sleep)
+        again = await self.service.poll_status(
+            self.caller, record.submission_id, interval_s=0.1, sleep=self.no_sleep
+        )
         self.assertEqual(again.stop_reason, "failed")
         self.assertEqual(self.calls.count("get"), count)
 
     async def test_poll_invalid_limits_are_rejected_before_query(self):
         record = await self.submit()
-        for limits in ({"max_checks": 0}, {"max_checks": True}, {"max_checks": 101}, {"timeout_s": float("nan")}, {"timeout_s": 0}, {"interval_s": -1}, {"interval_s": 0}, {"interval_s": float("inf")}, {"timeout_s": True}, {"timeout_s": 301}, {"interval_s": 31}):
-            with self.subTest(limits=limits), self.assertRaisesRegex(ValueError, "^invalid_poll_limits$"):
+        for limits in (
+            {"max_checks": 0},
+            {"max_checks": True},
+            {"max_checks": 101},
+            {"timeout_s": float("nan")},
+            {"timeout_s": 0},
+            {"interval_s": -1},
+            {"interval_s": 0},
+            {"interval_s": float("inf")},
+            {"timeout_s": True},
+            {"timeout_s": 301},
+            {"interval_s": 31},
+        ):
+            with (
+                self.subTest(limits=limits),
+                self.assertRaisesRegex(ValueError, "^invalid_poll_limits$"),
+            ):
                 await self.service.poll_status(self.caller, record.submission_id, **limits)
         self.assertEqual(self.calls.count("get"), 0)
 
     async def test_readonly_reconciliation_ignores_cleared_write_targets(self):
         record = await self.submit()
-        self.binding = replace(self.binding, writes_enabled=False, project_id="", library_parent_id="")
+        self.binding = replace(
+            self.binding, writes_enabled=False, project_id="", library_parent_id=""
+        )
         self.status = "okay"
         record = await self.service.check_status(self.caller, record.submission_id)
         self.assertEqual(record.state, "ready")
@@ -625,7 +742,14 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             self.binding = replace(self.binding, scope=replace(self.binding.scope, enabled=False))
             now[0] += delay
 
-        result = await self.service.poll_status(self.caller, record.submission_id, timeout_s=1, interval_s=2, sleep=sleep, monotonic=lambda: now[0])
+        result = await self.service.poll_status(
+            self.caller,
+            record.submission_id,
+            timeout_s=1,
+            interval_s=2,
+            sleep=sleep,
+            monotonic=lambda: now[0],
+        )
         self.assertEqual(result.stop_reason, "timeout")
         self.assertIsNone(result.record)
         self.assertEqual(self.calls.count("get"), 1)
@@ -656,7 +780,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.service._transport.get_document = get
-        result = await self.service.poll_status(self.caller, record.submission_id, timeout_s=1, monotonic=lambda: now[0])
+        result = await self.service.poll_status(
+            self.caller, record.submission_id, timeout_s=1, monotonic=lambda: now[0]
+        )
         self.assertEqual(result.stop_reason, "timeout")
         self.assertIsNone(result.record)
         self.assertEqual(self.ledger.records[record.submission_id].state, "ready")
@@ -696,13 +822,18 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         for reason in ("authorization_changed", "credentials_changed"):
             self.calls.clear()
 
-            async def get(_binding, _document_id):
+            async def get(_binding, _document_id, *, reason=reason):
                 self.calls.append("get")
                 raise MemoryLakeRunnerError(reason)
 
             self.service._transport.get_document = get
-            with self.subTest(reason=reason), self.assertRaisesRegex(SubmissionError, "^" + reason + "$"):
-                await self.service.poll_status(self.caller, record.submission_id, sleep=self.no_sleep)
+            with (
+                self.subTest(reason=reason),
+                self.assertRaisesRegex(SubmissionError, "^" + reason + "$"),
+            ):
+                await self.service.poll_status(
+                    self.caller, record.submission_id, sleep=self.no_sleep
+                )
             self.assertEqual(self.calls, ["get"])
             self.assertEqual(saves, [])
             self.assertEqual(self.ledger.records[record.submission_id], record)
@@ -721,7 +852,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             return await original(binding, document_id)
 
         self.service._transport.get_document = get
-        result = await self.service.poll_status(self.caller, record.submission_id, sleep=self.no_sleep)
+        result = await self.service.poll_status(
+            self.caller, record.submission_id, sleep=self.no_sleep
+        )
         self.assertEqual(result.stop_reason, "ready")
         self.assertEqual(result.checks, 2)
 
@@ -772,7 +905,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
                     raise MemoryLakeCancelledError() from None
 
         self.service._transport.get_document = get
-        task = asyncio.create_task(self.service.poll_status(self.caller, record.submission_id, timeout_s=0.01))
+        task = asyncio.create_task(
+            self.service.poll_status(self.caller, record.submission_id, timeout_s=0.01)
+        )
         await deadline_received.wait()
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -784,14 +919,19 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         for reason in (None, "output_limit", "spawn_failed", "unknown private diagnostic"):
             self.calls.clear()
 
-            async def get(_binding, _document_id):
+            async def get(_binding, _document_id, *, reason=reason):
                 self.calls.append("get")
                 if reason is not None:
                     raise MemoryLakeRunnerError(reason)
                 return ProcessResult(1, b'{"id":"doc-1","status":"okay"}', b"private")
 
             self.service._transport.get_document = get
-            with self.subTest(reason=reason), self.assertRaisesRegex(SubmissionError, "^status_query_failed$"):
-                await self.service.poll_status(self.caller, record.submission_id, sleep=self.no_sleep)
+            with (
+                self.subTest(reason=reason),
+                self.assertRaisesRegex(SubmissionError, "^status_query_failed$"),
+            ):
+                await self.service.poll_status(
+                    self.caller, record.submission_id, sleep=self.no_sleep
+                )
             self.assertEqual(self.calls, ["get"])
             self.assertEqual(self.ledger.records[record.submission_id], original_record)

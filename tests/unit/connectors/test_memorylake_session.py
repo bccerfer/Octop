@@ -12,8 +12,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from octop.infra.connectors.memorylake.session import isolated_cli_session
 from tests.support.memorylake import offline_test_guard
+
+from octop.infra.connectors.memorylake.session import isolated_cli_session
 
 
 @unittest.skipUnless(os.name == "posix", "secure Windows ACL provisioning is not implemented")
@@ -25,7 +26,9 @@ class MemoryLakeSessionTests(unittest.TestCase):
         with isolated_cli_session("dummy-key-a") as session:
             root = Path(session.environment["MEMORYLAKE_CONFIG_DIR"])
             data = tomllib.loads((root / "credentials.toml").read_text())
-            self.assertEqual(data, {"profiles": {"octop": {"api_key": "", "login_method": "api_key"}}})
+            self.assertEqual(
+                data, {"profiles": {"octop": {"api_key": "", "login_method": "api_key"}}}
+            )
             self.assertEqual(session.profile, "octop")
             self.assertEqual(session.environment["MEMORYLAKE_API_KEY"], "dummy-key-a")
             self.assertEqual(list(root.iterdir()), [root / "credentials.toml"])
@@ -43,15 +46,26 @@ class MemoryLakeSessionTests(unittest.TestCase):
         with patch.dict(os.environ, inherited, clear=True):
             before = dict(os.environ)
             with isolated_cli_session("dummy-key-a") as session:
-                self.assertEqual(set(session.environment), {"MEMORYLAKE_CONFIG_DIR", "MEMORYLAKE_API_KEY", "LANG", "LC_ALL"})
-                self.assertNotEqual(session.environment["MEMORYLAKE_CONFIG_DIR"], inherited["MEMORYLAKE_CONFIG_DIR"])
+                self.assertEqual(
+                    set(session.environment),
+                    {"MEMORYLAKE_CONFIG_DIR", "MEMORYLAKE_API_KEY", "LANG", "LC_ALL"},
+                )
+                self.assertNotEqual(
+                    session.environment["MEMORYLAKE_CONFIG_DIR"], inherited["MEMORYLAKE_CONFIG_DIR"]
+                )
                 self.assertNotIn("unrelated-user-key", session.environment.values())
                 self.assertEqual(dict(os.environ), before)
             self.assertEqual(dict(os.environ), before)
 
     def test_concurrent_connections_have_distinct_profile_directories(self) -> None:
-        with isolated_cli_session("dummy-key-a") as first, isolated_cli_session("dummy-key-b") as second:
-            self.assertNotEqual(first.environment["MEMORYLAKE_CONFIG_DIR"], second.environment["MEMORYLAKE_CONFIG_DIR"])
+        with (
+            isolated_cli_session("dummy-key-a") as first,
+            isolated_cli_session("dummy-key-b") as second,
+        ):
+            self.assertNotEqual(
+                first.environment["MEMORYLAKE_CONFIG_DIR"],
+                second.environment["MEMORYLAKE_CONFIG_DIR"],
+            )
             self.assertEqual(first.environment["MEMORYLAKE_API_KEY"], "dummy-key-a")
             self.assertEqual(second.environment["MEMORYLAKE_API_KEY"], "dummy-key-b")
 
@@ -71,7 +85,10 @@ class MemoryLakeSessionTests(unittest.TestCase):
         self.assertEqual(session.environment, {})
 
     def test_exception_also_cleans_up(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "fake failure"), isolated_cli_session("dummy-key-a") as session:
+        with (
+            self.assertRaisesRegex(RuntimeError, "fake failure"),
+            isolated_cli_session("dummy-key-a") as session,
+        ):
             root = Path(session.environment["MEMORYLAKE_CONFIG_DIR"])
             raise RuntimeError("fake failure")
         self.assertFalse(root.exists())
@@ -84,7 +101,11 @@ class MemoryLakeSessionTests(unittest.TestCase):
 
     def test_blank_invalid_and_oversized_key_fail_closed(self) -> None:
         for value in ("", "  ", "dummy\0key", "x" * 8193, None):
-            with self.subTest(value=type(value).__name__), self.assertRaises(ValueError), isolated_cli_session(value):
+            with (
+                self.subTest(value=type(value).__name__),
+                self.assertRaises(ValueError),
+                isolated_cli_session(value),
+            ):
                 self.fail("must reject invalid key")
 
 
@@ -93,7 +114,11 @@ class MemoryLakeSessionPlatformTests(unittest.TestCase):
         self.enterContext(offline_test_guard())
 
     def test_unimplemented_non_posix_acl_is_not_silently_insecure(self) -> None:
-        with patch("octop.infra.connectors.memorylake.session.os.name", "nt"), self.assertRaisesRegex(ValueError, "secure_session_unsupported"), isolated_cli_session("dummy-key"):
+        with (
+            patch("octop.infra.connectors.memorylake.session.os.name", "nt"),
+            self.assertRaisesRegex(ValueError, "secure_session_unsupported"),
+            isolated_cli_session("dummy-key"),
+        ):
             self.fail("must reject unsupported platform")
 
 
@@ -243,10 +268,12 @@ class MemoryLakeAsyncSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_platform_remains_closed(self) -> None:
         from octop.infra.connectors.memorylake.session import async_isolated_cli_session
 
-        with patch("octop.infra.connectors.memorylake.session.os.name", "nt"):
-            with self.assertRaisesRegex(ValueError, "secure_session_unsupported"):
-                async with async_isolated_cli_session("dummy-key"):
-                    self.fail("must reject unsupported platform")
+        with (
+            patch("octop.infra.connectors.memorylake.session.os.name", "nt"),
+            self.assertRaisesRegex(ValueError, "secure_session_unsupported"),
+        ):
+            async with async_isolated_cli_session("dummy-key"):
+                self.fail("must reject unsupported platform")
 
 
 if __name__ == "__main__":

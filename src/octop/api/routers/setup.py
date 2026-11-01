@@ -262,8 +262,12 @@ async def test_database(
     """Validate DSN/settings with a short-lived pool (does not replace the process pool)."""
     _enforce_wizard_open(server)
     from octop.infra.db.probe import probe_database
-    from octop.infra.db.rebind import database_config_from_payload
+    from octop.infra.db.rebind import (
+        assert_memorylake_file_runtime_detached,
+        database_config_from_payload,
+    )
 
+    assert_memorylake_file_runtime_detached(server)
     try:
         db_cfg = database_config_from_payload(body.as_payload())
     except ValueError as exc:
@@ -286,11 +290,13 @@ async def apply_database(
     from octop.infra.db.probe import probe_database
     from octop.infra.db.rebind import (
         assert_control_plane_database_empty,
+        assert_memorylake_file_runtime_detached,
         database_config_from_payload,
         persist_database_config,
         rebind_control_plane,
     )
 
+    assert_memorylake_file_runtime_detached(server)
     try:
         db_cfg = database_config_from_payload(body.as_payload())
     except ValueError as exc:

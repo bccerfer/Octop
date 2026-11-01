@@ -22,7 +22,7 @@ from octop.infra.connectors.memorylake.documents import (
 from octop.infra.connectors.memorylake.runner import MemoryLakeRunner
 from octop.infra.connectors.memorylake.session import isolated_cli_session
 
-_FAKE_CLI = '''
+_FAKE_CLI = """
 import json, os, pathlib, sys, tomllib
 root = pathlib.Path(os.environ["MEMORYLAKE_CONFIG_DIR"])
 profile = tomllib.loads((root / "credentials.toml").read_text())["profiles"]["octop"]
@@ -53,7 +53,7 @@ elif args[:3] == ["project", "document", "get"]:
     print(json.dumps({"id": "doc-1", "status": "okay"}))
 else:
     sys.exit(9)
-'''
+"""
 
 
 @unittest.skipUnless(os.name == "posix", "private sessions and process groups are POSIX-only")
@@ -74,7 +74,13 @@ class MemoryLakeOfflineFlowTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(os.environ, {"HTTP_PROXY": "https://poison.invalid"}):
                 # Test-only local setup; production session I/O must be offloaded.
                 with isolated_cli_session("dummy-only") as session:
-                    prefix = (str(script), "--profile", session.profile, "--base-url", "https://fake.invalid")
+                    prefix = (
+                        str(script),
+                        "--profile",
+                        session.profile,
+                        "--base-url",
+                        "https://fake.invalid",
+                    )
 
                     async def invoke(arguments: tuple[str, ...]):
                         return await runner.run(
@@ -86,26 +92,63 @@ class MemoryLakeOfflineFlowTests(unittest.IsolatedAsyncioTestCase):
                     search = plan_read(scope, caller, "search_documents", {"query": "--not-a-flag"})
                     response = await invoke(search.arguments)
                     self.assertEqual(response.returncode, 0)
-                    self.assertEqual(json.loads(response.stdout)["documents"][0]["document_id"], "doc-1")
+                    self.assertEqual(
+                        json.loads(response.stdout)["documents"][0]["document_id"], "doc-1"
+                    )
 
                     # Manual test composition only: no approval or upload service exists yet.
-                    response = await invoke(("library", "upload", "--parent", "folder-a", "--on-conflict", "deny", "--", str(source)))
+                    response = await invoke(
+                        (
+                            "library",
+                            "upload",
+                            "--parent",
+                            "folder-a",
+                            "--on-conflict",
+                            "deny",
+                            "--",
+                            str(source),
+                        )
+                    )
                     upload = parse_upload_result(response.returncode, response.stdout.decode())
                     self.assertEqual(upload.state, "uploaded")
                     self.assertEqual(upload.item_id, "file-1")
 
-                    response = await invoke(("project", "document", "import", "--workspace", "workspace-a", "--project", "project-a", "--max-files", "1", "--", upload.item_id))
+                    response = await invoke(
+                        (
+                            "project",
+                            "document",
+                            "import",
+                            "--workspace",
+                            "workspace-a",
+                            "--project",
+                            "project-a",
+                            "--max-files",
+                            "1",
+                            "--",
+                            upload.item_id,
+                        )
+                    )
                     imported = parse_import_result(response.returncode, response.stdout.decode())
                     self.assertEqual(response.returncode, 7)
                     self.assertEqual(imported.state, "accepted")
                     self.assertTrue(imported.requires_reconciliation)
                     self.assertEqual(imported.document_ids, ("doc-1",))
 
-                    command = plan_read(scope, caller, "get_document", {"project_id": "project-a", "document_id": imported.document_ids[0]})
+                    command = plan_read(
+                        scope,
+                        caller,
+                        "get_document",
+                        {"project_id": "project-a", "document_id": imported.document_ids[0]},
+                    )
                     response = await invoke(command.arguments)
-                    status = parse_document_result(response.returncode, response.stdout.decode(), imported.document_ids[0])
+                    status = parse_document_result(
+                        response.returncode, response.stdout.decode(), imported.document_ids[0]
+                    )
                     self.assertEqual(status.state, "ready")
                     # Retrieval verification is a separate read after indexing.
                     response = await invoke(search.arguments)
-                    self.assertEqual(json.loads(response.stdout)["documents"][0]["document_id"], status.document_id)
+                    self.assertEqual(
+                        json.loads(response.stdout)["documents"][0]["document_id"],
+                        status.document_id,
+                    )
                 self.assertEqual(session.environment, {})

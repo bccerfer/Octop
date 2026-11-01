@@ -233,6 +233,20 @@ class AgentRepo:
 
     def set_shared(self, agent_id: str, shared: bool) -> None:
         with self._db.transaction() as conn:
+            if shared:
+                # Same lock as material admission: neither check can race the
+                # other writer. SQLite transaction() uses BEGIN IMMEDIATE.
+                if self._db.dialect == "postgresql":
+                    conn.execute(
+                        "SELECT agent_id FROM agents WHERE agent_id=? FOR UPDATE", (agent_id,)
+                    ).fetchone()
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM memorylake_agent_admissions WHERE agent_id=?", (agent_id,)
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ValueError("memorylake_material_not_shareable")
             conn.execute(
                 "UPDATE agents SET is_shared = ?, updated_at = ? WHERE agent_id = ?",
                 (bool_int(shared), now_ts(), agent_id),

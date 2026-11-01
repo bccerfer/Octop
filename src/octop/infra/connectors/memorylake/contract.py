@@ -84,12 +84,7 @@ def _authorize(scope: ReadScope, caller: CallerContext) -> None:
 
 def _query(arguments: Mapping[str, object]) -> str:
     query = arguments.get("query")
-    if (
-        not isinstance(query, str)
-        or not query.strip()
-        or "\0" in query
-        or len(query) > 4096
-    ):
+    if not isinstance(query, str) or not query.strip() or "\0" in query or len(query) > 4096:
         raise MemoryLakeContractError("invalid_query")
     return query.strip()
 
@@ -132,6 +127,7 @@ def plan_read(
     }
     if operation not in allowed or set(arguments) - allowed[operation]:
         raise MemoryLakeContractError("unsupported_operation_or_arguments")
+    argv: tuple[str, ...]
     if operation in {"get_fact", "trace_fact"}:
         if scope.actor_id is None:
             raise MemoryLakeContractError("actor_scope_required")

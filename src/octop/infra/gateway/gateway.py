@@ -121,6 +121,7 @@ class Gateway:
         self._dispatcher = build_default_dispatcher()
         self._slash_meta: SlashRuntimeMeta | None = None
         self._ws_hub = WebSocketHub()
+        self._ws_hub_needs_reset = False
         self._cli_hub = CliHub()
         self._steer = SteerCoordinator()
         self._ws_channel: WebSocketChannel | None = None
@@ -225,6 +226,11 @@ class Gateway:
         }
 
     async def boot(self) -> None:
+        if self._ws_hub_needs_reset:
+            # Reboot gets a fresh registry. Never reactivate the closed hub or
+            # its old chat references held by disconnected ingress/tasks.
+            self._ws_hub = WebSocketHub()
+            self._ws_hub_needs_reset = False
         from octop.infra.gateway.process.channel_thinking import (
             install_channel_thinking_clean,
         )
@@ -332,6 +338,10 @@ class Gateway:
         logger.info("Gateway channels reloaded from DB (%d enabled)", len(rows))
 
     async def shutdown(self) -> None:
+        # Revoke chat source evidence before the first shutdown await. Closing
+        # the hub cannot recall callbacks or remote operations already started.
+        self._ws_hub.close()
+        self._ws_hub_needs_reset = True
         await self._history_backfill.close()
         if self._channel_manager:
             await self._channel_manager.stop()
@@ -538,8 +548,16 @@ class Gateway:
         Same-session IM turns are serialized by ChannelManager. Without this hook,
         ``/stop`` waits behind the in-flight turn and never interrupts it.
         """
+        from octop.infra.connectors.memorylake.origin import DashboardInbound
         from octop.infra.gateway.process.message_keys import session_key_from_message
         from octop.infra.gateway.slash.parser import parse_slash
+
+        # This hook runs BEFORE the channel's authorized consumer. A pending,
+        # expired or mutated MemoryLake envelope must not preempt an existing
+        # turn. Native control messages retain their independent normal path;
+        # this exclusion does not register any MemoryLake handler or authority.
+        if isinstance(message, DashboardInbound):
+            return
 
         text = getattr(message, "text", None)
         cmd = parse_slash(text if isinstance(text, str) else None)

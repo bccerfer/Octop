@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import unittest
 
+from tests.support.memorylake import offline_test_guard
+
 from octop.infra.connectors.memorylake.documents import (
     parse_document_result,
     parse_import_result,
     parse_upload_result,
 )
-from tests.support.memorylake import offline_test_guard
 
 
 class MemoryLakeDocumentContractTests(unittest.TestCase):
@@ -49,9 +50,7 @@ class MemoryLakeDocumentContractTests(unittest.TestCase):
         payload = self._import_payload(
             success_count=0,
             duplicate_count=1,
-            details=[
-                {"result": "duplicate", "drive_item_id": "file-1", "document_id": "doc-1"}
-            ],
+            details=[{"result": "duplicate", "drive_item_id": "file-1", "document_id": "doc-1"}],
         )
         receipt = parse_import_result(0, payload)
         self.assertEqual(receipt.state, "accepted")
@@ -75,9 +74,7 @@ class MemoryLakeDocumentContractTests(unittest.TestCase):
     def test_complete_rejection_is_failed_not_unknown(self) -> None:
         receipt = parse_import_result(
             1,
-            self._import_payload(
-                success_count=0, failure_count=1, details=[{"result": "failed"}]
-            ),
+            self._import_payload(success_count=0, failure_count=1, details=[{"result": "failed"}]),
         )
         self.assertEqual(receipt.state, "failed")
 
@@ -201,11 +198,17 @@ class MemoryLakeDocumentContractTests(unittest.TestCase):
                 self.assertEqual(upload.state, "unknown")
                 self.assertIsNone(upload.item_id)
                 for key in ("drive_item_id", "document_id"):
-                    detail = {"result": "success", "drive_item_id": "file-1", "document_id": "doc-1"}
+                    detail = {
+                        "result": "success",
+                        "drive_item_id": "file-1",
+                        "document_id": "doc-1",
+                    }
                     detail[key] = identifier
                     receipt = parse_import_result(0, self._import_payload(details=[detail]))
                     self.assertIsNone(
-                        receipt.items[0].file_id if key == "drive_item_id" else receipt.items[0].document_id
+                        receipt.items[0].file_id
+                        if key == "drive_item_id"
+                        else receipt.items[0].document_id
                     )
                     self.assertTrue(receipt.requires_reconciliation)
                     self.assertNotIn(identifier, repr(receipt))
@@ -237,9 +240,7 @@ class MemoryLakeDocumentContractTests(unittest.TestCase):
             "success_count": 1,
             "failure_count": 0,
             "duplicate_count": 0,
-            "details": [
-                {"result": "success", "drive_item_id": "file-1", "document_id": "doc-1"}
-            ],
+            "details": [{"result": "success", "drive_item_id": "file-1", "document_id": "doc-1"}],
             "details_truncated": False,
         }
         payload.update(overrides)
@@ -251,6 +252,12 @@ class MemoryLakeDocumentContractTests(unittest.TestCase):
         self.assertTrue(receipt.requires_reconciliation)
 
     def test_incomplete_reports_never_set_complete_report(self) -> None:
-        for overrides in ({"details_truncated": True}, {"success_count": 2}, {"details": [{"result": "success"}]}):
+        for overrides in (
+            {"details_truncated": True},
+            {"success_count": 2},
+            {"details": [{"result": "success"}]},
+        ):
             with self.subTest(overrides=overrides):
-                self.assertFalse(parse_import_result(0, self._import_payload(**overrides)).complete_report)
+                self.assertFalse(
+                    parse_import_result(0, self._import_payload(**overrides)).complete_report
+                )

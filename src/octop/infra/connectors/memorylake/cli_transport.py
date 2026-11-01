@@ -1,12 +1,13 @@
-"""Unregistered CLI transport for the approved-submission domain.
+"""CLI transport for the approved-submission domain.
 
 This adapter does not issue approval. Only SubmissionService with a transactional
 ledger and authenticated caller may supply StepLease. A lease is a trusted-domain
 snapshot, not an unforgeable capability. Revocation after its atomic grant cannot
 retract the already-granted step; expiration is checked again before launch. Executable version
-and hash verification, durable storage and workspace adapters remain deployment
-gates. No operation retries, deletes remote data, or invokes authentication CLI.
+and hash checks are composed by the optional application; real artifact/service
+validation and existing-workspace attachment export remain deployment gates. No operation retries, deletes remote data, or invokes authentication CLI.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -84,7 +85,9 @@ def _safe_result(result: ProcessResult | None, operation: str, secret: str) -> P
                     selected["id"] = _safe_id(payload["id"])
                 if "status" in payload:
                     status = payload["status"]
-                    selected["status"] = status if status in ("pending", "running", "okay", "error") else None
+                    selected["status"] = (
+                        status if status in ("pending", "running", "okay", "error") else None
+                    )
             else:
                 for key in ("success_count", "failure_count", "duplicate_count"):
                     if key in payload:
@@ -95,14 +98,22 @@ def _safe_result(result: ProcessResult | None, operation: str, secret: str) -> P
                     selected["details_truncated"] = value if type(value) is bool else None
                 if "details" in payload:
                     details = payload["details"]
-                    selected["details"] = [
-                        {
-                            "result": item.get("result") if item.get("result") in ("success", "duplicate", "failed") else None,
-                            "drive_item_id": _safe_id(item.get("drive_item_id")),
-                            "document_id": _safe_id(item.get("document_id")),
-                        } if isinstance(item, dict) else None
-                        for item in details
-                    ] if isinstance(details, list) else None
+                    selected["details"] = (
+                        [
+                            {
+                                "result": item.get("result")
+                                if item.get("result") in ("success", "duplicate", "failed")
+                                else None,
+                                "drive_item_id": _safe_id(item.get("drive_item_id")),
+                                "document_id": _safe_id(item.get("document_id")),
+                            }
+                            if isinstance(item, dict)
+                            else None
+                            for item in details
+                        ]
+                        if isinstance(details, list)
+                        else None
+                    )
             encoded = json.dumps(selected, allow_nan=False).encode("utf-8")
             if len(encoded) <= 1024 * 1024:
                 stdout = encoded
@@ -139,10 +150,14 @@ class MemoryLakeCliTransport:
         current = await self._load_binding()
         if not isinstance(current, WriteBinding) or not isinstance(expected, WriteBinding):
             raise MemoryLakeRunnerError("authorization_changed")
-        same_scope = current == expected if write else (
-            current.scope == expected.scope
-            and current.base_url == expected.base_url
-            and current.credential_revision == expected.credential_revision
+        same_scope = (
+            current == expected
+            if write
+            else (
+                current.scope == expected.scope
+                and current.base_url == expected.base_url
+                and current.credential_revision == expected.credential_revision
+            )
         )
         if (
             not same_scope
@@ -175,8 +190,12 @@ class MemoryLakeCliTransport:
         return ReadCredentials(credentials.api_key.strip(), credentials.revision)
 
     def _lease(
-        self, binding: WriteBinding, operation: str, lease: StepLease | None,
-        snapshot: FileSnapshot | None, identifier: str | None,
+        self,
+        binding: WriteBinding,
+        operation: str,
+        lease: StepLease | None,
+        snapshot: FileSnapshot | None,
+        identifier: str | None,
     ) -> None:
         if operation == "get":
             return
@@ -241,6 +260,7 @@ class MemoryLakeCliTransport:
                 key = credentials.api_key
                 async with async_isolated_cli_session(key) as session:
                     root = Path(session.environment["MEMORYLAKE_CONFIG_DIR"])
+                    args: tuple[str, ...]
                     if operation == "upload":
                         assert snapshot is not None
                         staged, cancelled = await _complete(
@@ -248,12 +268,28 @@ class MemoryLakeCliTransport:
                         )
                         if cancelled is not None:
                             raise cancelled
-                        args = ("library", "upload", "--parent", binding.library_parent_id,
-                                "--name=" + snapshot.filename, "--on-conflict", "deny", "--", str(staged))
+                        args = (
+                            "library",
+                            "upload",
+                            "--parent",
+                            binding.library_parent_id,
+                            "--name=" + snapshot.filename,
+                            "--on-conflict",
+                            "deny",
+                            "--",
+                            str(staged),
+                        )
                     else:
                         assert identifier is not None
-                        args = ("project", "document", operation, "--workspace", binding.scope.workspace_id,
-                                "--project", binding.project_id)
+                        args = (
+                            "project",
+                            "document",
+                            operation,
+                            "--workspace",
+                            binding.scope.workspace_id,
+                            "--project",
+                            binding.project_id,
+                        )
                         if operation == "import":
                             args += ("--max-files", "1")
                         args += ("--", identifier)
@@ -270,14 +306,28 @@ class MemoryLakeCliTransport:
                 assert safe is not None
                 return safe
             except asyncio.CancelledError as error:
-                partial = error.partial_result if isinstance(error, MemoryLakeCancelledError) else result
-                raise MemoryLakeCancelledError(partial_result=_safe_result(partial, operation, key)) from None
+                partial = (
+                    error.partial_result if isinstance(error, MemoryLakeCancelledError) else result
+                )
+                raise MemoryLakeCancelledError(
+                    partial_result=_safe_result(partial, operation, key)
+                ) from None
             except MemoryLakeRunnerError as error:
                 reason = str(error)
-                if reason not in {"timeout", "output_limit", "spawn_failed", "authorization_changed", "credentials_changed", "invalid_step_lease", "lease_snapshot_mismatch", "lease_item_mismatch"}:
+                if reason not in {
+                    "timeout",
+                    "output_limit",
+                    "spawn_failed",
+                    "authorization_changed",
+                    "credentials_changed",
+                    "invalid_step_lease",
+                    "lease_snapshot_mismatch",
+                    "lease_item_mismatch",
+                }:
                     reason = "cli_transport_failed"
                 raise MemoryLakeRunnerError(
-                    reason, partial_result=_safe_result(error.partial_result or result, operation, key)
+                    reason,
+                    partial_result=_safe_result(error.partial_result or result, operation, key),
                 ) from None
             except Exception:
                 raise MemoryLakeRunnerError(

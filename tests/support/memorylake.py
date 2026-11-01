@@ -4,6 +4,7 @@ This blocks Python socket egress, not arbitrary native code/OS syscalls. It is a
 regression tripwire, not a production sandbox. Never install it in production.
 Test processes using it must not concurrently run tests that need real networking.
 """
+
 from __future__ import annotations
 
 import os
@@ -30,6 +31,7 @@ def _guard_method(original):
         if sock.family in (socket.AF_INET, socket.AF_INET6):
             _deny()
         return original(sock, *args, **kwargs)
+
     return guarded
 
 
@@ -41,7 +43,14 @@ def deny_network() -> Iterator[None]:
             if hasattr(socket.socket, method):
                 original = getattr(socket.socket, method)
                 stack.enter_context(patch.object(socket.socket, method, _guard_method(original)))
-        for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo", "getfqdn"):
+        for name in (
+            "getaddrinfo",
+            "gethostbyname",
+            "gethostbyname_ex",
+            "gethostbyaddr",
+            "getnameinfo",
+            "getfqdn",
+        ):
             stack.enter_context(patch.object(socket, name, _deny))
         yield
 

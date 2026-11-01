@@ -61,7 +61,7 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result.stdout), [None, "fake", str(self.root), ""])
 
     async def test_arguments_are_not_shell_interpreted(self) -> None:
-        arguments = self.script('import sys,json\nprint(json.dumps(sys.argv[1:]))\n')
+        arguments = self.script("import sys,json\nprint(json.dumps(sys.argv[1:]))\n")
         query = "--base-url=bad; $(touch never-created)"
         result = await self.runner.run((*arguments, query), env={}, cwd=self.root)
         self.assertEqual(json.loads(result.stdout), [query])
@@ -69,17 +69,17 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_combined_stdout_stderr_limit(self) -> None:
         with self.assertRaisesRegex(MemoryLakeRunnerError, "^output_limit$"):
-            await self.run_script(
-                'import os\nos.write(1,b"a"*600)\nos.write(2,b"b"*600)\n'
-            )
+            await self.run_script('import os\nos.write(1,b"a"*600)\nos.write(2,b"b"*600)\n')
 
     async def test_large_output_is_stopped(self) -> None:
         with self.assertRaisesRegex(MemoryLakeRunnerError, "^output_limit$"):
-            await asyncio.wait_for(self.run_script('import os\nwhile True: os.write(1,b"x"*65536)\n'), 3)
+            await asyncio.wait_for(
+                self.run_script('import os\nwhile True: os.write(1,b"x"*65536)\n'), 3
+            )
 
     async def test_timeout_does_not_echo_sensitive_arguments(self) -> None:
         self.runner = MemoryLakeRunner(Path(sys.executable), timeout_s=0.1)
-        args = self.script('import time\ntime.sleep(30)\n')
+        args = self.script("import time\ntime.sleep(30)\n")
         with self.assertRaisesRegex(MemoryLakeRunnerError, "^timeout$") as raised:
             await self.runner.run((*args, "sensitive-body"), env={}, cwd=self.root)
         self.assertNotIn("sensitive-body", repr(raised.exception))
@@ -91,8 +91,8 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.runner = MemoryLakeRunner(Path(sys.executable), timeout_s=1.0)
         with self.assertRaisesRegex(MemoryLakeRunnerError, "^timeout$") as raised:
             await self.run_script(
-                "import time\nprint('{\"item_id\":\"private-accepted\"}',flush=True)\n"
-                'time.sleep(30)\n'
+                'import time\nprint(\'{"item_id":"private-accepted"}\',flush=True)\n'
+                "time.sleep(30)\n"
             )
         error = raised.exception
         self.assertEqual(error.args, ("timeout",))
@@ -105,7 +105,7 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_overflow_preserves_json_and_bounded_chunk_prefix(self) -> None:
         with self.assertRaisesRegex(MemoryLakeRunnerError, "^output_limit$") as raised:
             await self.run_script(
-                "import os,time\nprint('{\"document_id\":\"private-accepted\"}',flush=True)\n"
+                'import os,time\nprint(\'{"document_id":"private-accepted"}\',flush=True)\n'
                 'time.sleep(0.05)\nos.write(2,b"private-stderr"*10000)\n'
             )
         error = raised.exception
@@ -122,7 +122,7 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancellation_preserves_accepted_json_as_typed_evidence(self) -> None:
         marker = self.root / "accepted"
         args = self.script(
-            "import pathlib,time\nprint('{\"item_id\":\"private-accepted\"}',flush=True)\n"
+            'import pathlib,time\nprint(\'{"item_id":"private-accepted"}\',flush=True)\n'
             f"pathlib.Path({str(marker)!r}).touch()\ntime.sleep(30)\n"
         )
         task = asyncio.create_task(self.runner.run(args, env={}, cwd=self.root))
@@ -147,7 +147,7 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancellation_reaps_process_and_releases_slot(self) -> None:
         marker = self.root / "started"
         args = self.script(
-            f'import pathlib,time,os\npathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(30)\n'
+            f"import pathlib,time,os\npathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(30)\n"
         )
         task = asyncio.create_task(self.runner.run(args, env={}, cwd=self.root))
         async with asyncio.timeout(2):
@@ -167,7 +167,7 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(MemoryLakeRunnerError, "^timeout$"):
             await asyncio.wait_for(
                 self.run_script(
-                    'import os,time\nif os.fork() == 0:\n time.sleep(30)\nelse:\n os._exit(0)\n'
+                    "import os,time\nif os.fork() == 0:\n time.sleep(30)\nelse:\n os._exit(0)\n"
                 ),
                 3,
             )
@@ -204,7 +204,7 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return process
 
-        args = self.script('import time\ntime.sleep(30)\n')
+        args = self.script("import time\ntime.sleep(30)\n")
         with patch(
             "octop.infra.connectors.memorylake.runner.asyncio.create_subprocess_exec",
             side_effect=delayed_spawn,
@@ -225,17 +225,26 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
         timeout_s = 1.0
         for reason in ("cancelled", "timeout"):
             with self.subTest(reason=reason):
-                self.runner = MemoryLakeRunner(Path(sys.executable), timeout_s=timeout_s, max_output_bytes=64)
+                self.runner = MemoryLakeRunner(
+                    Path(sys.executable), timeout_s=timeout_s, max_output_bytes=64
+                )
                 marker = self.root / (reason + "-flushed")
                 args = self.script(
-                    "import pathlib,time,os\nprint('{\"item_id\":\"accepted-unread\"}',flush=True)\n"
-                    f"os.write(2,b\"d\"*4096)\npathlib.Path({str(marker)!r}).touch()\ntime.sleep(30)\n"
+                    'import pathlib,time,os\nprint(\'{"item_id":"accepted-unread"}\',flush=True)\n'
+                    f'os.write(2,b"d"*4096)\npathlib.Path({str(marker)!r}).touch()\ntime.sleep(30)\n'
                 )
                 actual_spawn = asyncio.create_subprocess_exec
                 created = asyncio.Event()
                 release = asyncio.Event()
 
-                async def delayed_spawn(*args, **kwargs):
+                async def delayed_spawn(
+                    *args,
+                    actual_spawn=actual_spawn,
+                    marker=marker,
+                    created=created,
+                    release=release,
+                    **kwargs,
+                ):
                     process = await actual_spawn(*args, **kwargs)
                     while not marker.exists():
                         await asyncio.sleep(0.01)
@@ -254,14 +263,18 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         await asyncio.sleep(timeout_s + 0.05)
                     release.set()
-                    expected = MemoryLakeCancelledError if reason == "cancelled" else MemoryLakeRunnerError
+                    expected = (
+                        MemoryLakeCancelledError if reason == "cancelled" else MemoryLakeRunnerError
+                    )
                     with self.assertRaises(expected) as raised:
                         await task
                 error = raised.exception
                 self.assertEqual(str(error), reason)
                 self.assertNotIn("accepted-unread", repr(error))
                 self.assertIsNotNone(error.partial_result)
-                self.assertEqual(json.loads(error.partial_result.stdout), {"item_id": "accepted-unread"})
+                self.assertEqual(
+                    json.loads(error.partial_result.stdout), {"item_id": "accepted-unread"}
+                )
                 self.assertLess(error.partial_result.returncode, 0)
                 self.assertEqual(
                     len(error.partial_result.stdout) + len(error.partial_result.stderr),
@@ -281,6 +294,8 @@ class MemoryLakeRunnerTests(unittest.IsolatedAsyncioTestCase):
             MemoryLakeRunner(Path("python"))
 
     def test_windows_fails_closed(self) -> None:
-        with patch("octop.infra.connectors.memorylake.runner.os.name", "nt"):
-            with self.assertRaisesRegex(MemoryLakeRunnerError, "^unsupported_platform$"):
-                MemoryLakeRunner(Path(sys.executable))
+        with (
+            patch("octop.infra.connectors.memorylake.runner.os.name", "nt"),
+            self.assertRaisesRegex(MemoryLakeRunnerError, "^unsupported_platform$"),
+        ):
+            MemoryLakeRunner(Path(sys.executable))

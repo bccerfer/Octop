@@ -18,7 +18,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import PageShell from "../../../layouts/PageShell";
 import TabBar, { type TabBarItem } from "../../../components/TabLabel/TabBar";
@@ -2456,6 +2456,7 @@ export default function ConnectorsPage() {
     <PageShell.Tabbed
       title={t("pageShell.connectors.title")}
       subtitle={t("pageShell.connectors.subtitle")}
+      actions={<Link to="/connectors/memorylake">{t("memorylake.open")}</Link>}
       tabBar={
         <TabBar
           tabs={visibleConnectorTabs}

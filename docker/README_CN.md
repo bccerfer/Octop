@@ -71,6 +71,56 @@ bash docker/docker_build.sh
 
 Compose 可在 `docker/.env` 中配置上述变量。注意：`.env` 只参与 Compose 插值，变量必须出现在 `docker-compose.yml` 的 `environment:` 中才会进入容器。也可把相同键写入挂载数据目录下的 `~/.octop/env`。
 
+### 可选 MemoryLake CLI（预览）
+
+MemoryLake 是外部既有服务，本部署不负责部署或运维该服务。Octop 保留原生记忆，
+仅通过单独提供的 CLI 接入；标准镜像不会下载二进制，也不添加 sidecar。
+功能**默认关闭**。HTTP/UI 接线仍在使用 fake runner 验证，不能视为生产可用；
+真实 PostgreSQL 与多 worker 运行尚未验证。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `OCTOP_MEMORYLAKE_CLI_ENABLED` | `false` | 操作者显式启用；完成部署验证前保持关闭 |
+| `OCTOP_MEMORYLAKE_CLI_EXECUTABLE` | 空 | 容器内固定的可执行文件绝对路径 |
+| `OCTOP_MEMORYLAKE_CLI_EXPECTED_VERSION` | 空 | 精确发布版本，不含 `memorylake ` 前缀 |
+| `OCTOP_MEMORYLAKE_CLI_SHA256` | 空 | 经核验二进制的完整 64 位十六进制 SHA-256 |
+
+以上对应 Octop 配置中的 `memorylake_cli.enabled`、`.executable`、
+`.expected_version` 和 `.sha256`。两个标准 Compose 文件均无默认值地透传这四个变量。
+请在调用 Compose 的 shell 中显式 export；不要假设未导出的 `.env` 项必然进入容器。
+
+操作者需自行获取并独立核验与容器平台匹配的可信发布产物。
+**本预览尚未确认具体发布来源、版本或哈希**，不要使用随意下载的文件或编造摘要。
+文件必须是普通 POSIX 可执行文件，采用无符号链接路径组件的绝对路径，不允许
+组/其他用户写入或 setuid/setgid 位，并置于可信只读位置。父目录也应由可信操作者
+控制；哈希校验不构成对本地特权修改者的隔离。
+
+Compose 默认不挂载 CLI，避免未配置时影响原生启动。请在**自己的 override** 中
+添加只读绑定，例如以下片段（不是完整部署配置）：
+
+```yaml
+services:
+  octop:
+    volumes:
+      - type: bind
+        source: ${MEMORYLAKE_CLI_HOST_FILE:?set an independently verified absolute host file path}
+        target: /opt/memorylake/memorylake
+        read_only: true
+        bind:
+          create_host_path: false
+```
+
+将 `OCTOP_MEMORYLAKE_CLI_EXECUTABLE=/opt/memorylake/memorylake` 设置为匹配的
+容器路径，提供独立核验的版本与摘要后再显式启用。沿用标准 Compose 文件叠加自己的
+override，不替换原生数据卷，也不添加 MemoryLake 服务。标准非 Docker 安装使用
+相同四项配置，路径改为操作者管理的本地可执行文件。
+
+激活时**先校验内容哈希，再执行**固定的 `--version` 命令，使用私有 HOME/config
+目录；输出必须精确等于 `memorylake {expected_version}\n`。文件缺失或校验不通过时，
+只禁用 MemoryLake 接入，不阻止原生 Octop 启动。这只验证本地产物，不代表远端连通性
+或服务兼容性通过。连接凭据、项目权限、写入开关与逐文件显式批准仍各自必需；
+部署配置本身不授权上传。
+
 ### 知识库依赖
 
 镜像除 `browser` 外，还包含 `local-embedding` 和 `knowledge-ocr` 可选依赖。

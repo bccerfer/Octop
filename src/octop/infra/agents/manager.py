@@ -870,7 +870,12 @@ class AgentManager:
             row = self._repos.agent_repo.get(agent_id)
             assert row is not None
             if spec.is_shared:
-                self._repos.agent_repo.set_shared(agent_id, True)
+                try:
+                    self._repos.agent_repo.set_shared(agent_id, True)
+                except ValueError as error:
+                    if error.args == ("memorylake_material_not_shareable",):
+                        raise OctopError.localized(ErrorCode.RESOURCE_NOT_ALLOWED) from None
+                    raise
                 row = self._repos.agent_repo.get(agent_id)
                 assert row is not None
             if spec.kind == "team":
@@ -1080,7 +1085,12 @@ class AgentManager:
 
         if shared and is_team_agent(existing):
             raise OctopError(ErrorCode.TEAM_NOT_SHAREABLE, "teams cannot be shared")
-        self._repos.agent_repo.set_shared(agent_id, shared)
+        try:
+            self._repos.agent_repo.set_shared(agent_id, shared)
+        except ValueError as error:
+            if error.args == ("memorylake_material_not_shareable",):
+                raise OctopError.localized(ErrorCode.RESOURCE_NOT_ALLOWED) from None
+            raise
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")

@@ -11,6 +11,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.support.memorylake import offline_test_guard
+
 from octop.infra.connectors.memorylake.contract import CallerContext, ReadScope
 from octop.infra.connectors.memorylake.read_service import (
     MemoryLakeReadError,
@@ -19,16 +21,19 @@ from octop.infra.connectors.memorylake.read_service import (
     ReadCredentials,
 )
 from octop.infra.connectors.memorylake.runner import ProcessResult
-from tests.support.memorylake import offline_test_guard
 
 
 @unittest.skipUnless(os.name == "posix", "private CLI sessions require POSIX")
 class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.enterContext(offline_test_guard())
-        self.scope = ReadScope("connection-a", 11, "agent-a", "workspace-a", ("project-a",), "actor-a")
+        self.scope = ReadScope(
+            "connection-a", 11, "agent-a", "workspace-a", ("project-a",), "actor-a"
+        )
         self.caller = CallerContext(11, "agent-a", 11, 1)
-        self.connection = ReadConnection(self.scope, "https://app.memorylake.ai/openapi/memorylake", credential_revision=1)
+        self.connection = ReadConnection(
+            self.scope, "https://app.memorylake.ai/openapi/memorylake", credential_revision=1
+        )
         self.key = "dummy-api-key"
         self.calls = []
         self.events = []
@@ -53,7 +58,10 @@ class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
             self.events.append("load-key")
             return ReadCredentials(self.key, self.connection.credential_revision)
 
-        with patch("octop.infra.connectors.memorylake.read_service.MemoryLakeRunner", return_value=FakeRunner()):
+        with patch(
+            "octop.infra.connectors.memorylake.read_service.MemoryLakeRunner",
+            return_value=FakeRunner(),
+        ):
             self.service = MemoryLakeReadService(
                 "connection-a",
                 executable=Path(sys.executable),
@@ -68,7 +76,9 @@ class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
         response = await self.call()
         self.assertTrue(response["untrusted"])
         self.assertEqual(response["connector_id"], "connection-a")
-        self.assertEqual(self.events, ["load-connection", "load-key", "load-connection", "load-connection"])
+        self.assertEqual(
+            self.events, ["load-connection", "load-key", "load-connection", "load-connection"]
+        )
         args, env, cwd = self.calls[0]
         self.assertEqual(args[:4], ("--profile", "octop", "--base-url", self.connection.base_url))
         self.assertEqual(args[-2:], ("--", "q"))
@@ -99,7 +109,9 @@ class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scope_change_during_credential_load_is_rejected_before_execution(self) -> None:
         async def changed_key():
-            self.connection = replace(self.connection, scope=replace(self.scope, authorization_revision=2))
+            self.connection = replace(
+                self.connection, scope=replace(self.scope, authorization_revision=2)
+            )
             return ReadCredentials(self.key, self.connection.credential_revision)
 
         self.service._load_credentials = changed_key
@@ -163,25 +175,49 @@ class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
             ProcessResult(0, b"\xff", b""),
         ):
             self.reply = result
-            with self.subTest(code=result.returncode), self.assertRaises(MemoryLakeReadError) as raised:
+            with (
+                self.subTest(code=result.returncode),
+                self.assertRaises(MemoryLakeReadError) as raised,
+            ):
                 await self.call()
             self.assertNotIn("private", str(raised.exception))
 
     async def test_api_key_is_redacted_from_successful_retrieval_text(self) -> None:
-        self.reply = ProcessResult(0, json.dumps({
-            "documents": [{"document_id": "doc-1", "project_id": "project-a", "document_summary": self.key}],
-            "facts": [], "databases": [],
-        }).encode(), b"")
+        self.reply = ProcessResult(
+            0,
+            json.dumps(
+                {
+                    "documents": [
+                        {
+                            "document_id": "doc-1",
+                            "project_id": "project-a",
+                            "document_summary": self.key,
+                        }
+                    ],
+                    "facts": [],
+                    "databases": [],
+                }
+            ).encode(),
+            b"",
+        )
         response = await self.call()
         self.assertNotIn(self.key, json.dumps(response))
         self.assertIn("[redacted]", json.dumps(response))
 
     async def test_json_escaped_key_echo_is_also_redacted(self) -> None:
-        payload = json.dumps({
-            "documents": [{"document_id": "doc-1", "document_summary": self.key,
-                           "items": [{"type": "future", "extra": {self.key: self.key}}]}],
-            "facts": [], "databases": [],
-        })
+        payload = json.dumps(
+            {
+                "documents": [
+                    {
+                        "document_id": "doc-1",
+                        "document_summary": self.key,
+                        "items": [{"type": "future", "extra": {self.key: self.key}}],
+                    }
+                ],
+                "facts": [],
+                "databases": [],
+            }
+        )
         escaped = "".join(f"\\u{ord(char):04x}" for char in self.key)
         self.reply = ProcessResult(0, payload.replace(self.key, escaped).encode(), b"")
         response = await self.call()
@@ -190,13 +226,21 @@ class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_whitespace_padded_key_is_normalized_before_redaction(self) -> None:
         self.key = "  dummy-api-key \n"
-        self.reply = ProcessResult(0, b'{"documents":[{"document_id":"doc-1","document_summary":"dummy-api-key"}],"facts":[],"databases":[]}', b"")
+        self.reply = ProcessResult(
+            0,
+            b'{"documents":[{"document_id":"doc-1","document_summary":"dummy-api-key"}],"facts":[],"databases":[]}',
+            b"",
+        )
         response = await self.call()
         self.assertNotIn("dummy-api-key", json.dumps(response))
         self.assertEqual(self.calls[0][1]["MEMORYLAKE_API_KEY"], "dummy-api-key")
 
     async def test_out_of_scope_result_is_not_returned(self) -> None:
-        self.reply = ProcessResult(0, b'{"documents":[{"document_id":"doc-1","project_id":"other"}],"facts":[],"databases":[]}', b"")
+        self.reply = ProcessResult(
+            0,
+            b'{"documents":[{"document_id":"doc-1","project_id":"other"}],"facts":[],"databases":[]}',
+            b"",
+        )
         with self.assertRaisesRegex(MemoryLakeReadError, "invalid_read_response"):
             await self.call()
 
@@ -205,7 +249,11 @@ class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
             ("search_facts", {"query": "q"}, {"facts": [{"id": "fact-1", "fact": "fixture"}]}),
             ("get_fact", {"fact_id": "fact-1"}, {"id": "fact-1", "fact": "fixture"}),
             ("trace_fact", {"fact_id": "fact-1"}, {"fact": {"id": "fact-1"}, "trace": []}),
-            ("get_document", {"project_id": "project-a", "document_id": "doc-1"}, {"id": "doc-1", "status": "okay"}),
+            (
+                "get_document",
+                {"project_id": "project-a", "document_id": "doc-1"},
+                {"id": "doc-1", "status": "okay"},
+            ),
         ):
             with self.subTest(operation=operation):
                 self.reply = ProcessResult(0, json.dumps(payload).encode(), b"")
@@ -214,8 +262,12 @@ class MemoryLakeReadServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(response["untrusted"])
 
     async def test_result_must_match_requested_subset_not_just_connection_allowlist(self) -> None:
-        self.connection = replace(self.connection, scope=replace(self.scope, project_ids=("project-a", "project-b")))
-        self.reply = ProcessResult(0, b'{"documents":[{"document_id":"doc-1","project_id":"project-b"}]}', b"")
+        self.connection = replace(
+            self.connection, scope=replace(self.scope, project_ids=("project-a", "project-b"))
+        )
+        self.reply = ProcessResult(
+            0, b'{"documents":[{"document_id":"doc-1","project_id":"project-b"}]}', b""
+        )
         with self.assertRaisesRegex(MemoryLakeReadError, "invalid_read_response"):
             await self.call(project_ids=["project-a"])
 

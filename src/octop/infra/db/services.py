@@ -21,6 +21,8 @@ from octop.infra.db.repos.connectors import ConnectorRepo
 from octop.infra.db.repos.cron import CronJobRepo
 from octop.infra.db.repos.invites import InviteRepo
 from octop.infra.db.repos.knowledge import KnowledgeRepo
+from octop.infra.db.repos.memorylake import MemoryLakeBindingRepo
+from octop.infra.db.repos.memorylake_submissions import MemoryLakeSubmissionRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
 from octop.infra.db.repos.providers import ProviderRepo
 from octop.infra.db.repos.published_experts import PublishedExpertRepo
@@ -64,6 +66,8 @@ class RepoBundle:
     storage_backend_repo: SealedBackendRepo
     bridge_connection_repo: BridgeConnectionRepo
     connector_repo: ConnectorRepo
+    memorylake_binding_repo: MemoryLakeBindingRepo
+    memorylake_submission_repo: MemoryLakeSubmissionRepo
     skill_package_repo: SkillPackageRepo
     published_expert_repo: PublishedExpertRepo
     knowledge_repo: KnowledgeRepo
@@ -98,6 +102,8 @@ class RepoBundle:
             storage_backend_repo=SealedBackendRepo(BackendRepo(db), secret_repo),
             bridge_connection_repo=BridgeConnectionRepo(db),
             connector_repo=ConnectorRepo(db),
+            memorylake_binding_repo=MemoryLakeBindingRepo(db),
+            memorylake_submission_repo=MemoryLakeSubmissionRepo(db),
             skill_package_repo=SkillPackageRepo(db),
             published_expert_repo=PublishedExpertRepo(db),
             knowledge_repo=KnowledgeRepo(db),
@@ -188,6 +194,14 @@ class SharedServices:
     @property
     def bridge_connection_repo(self) -> BridgeConnectionRepo:
         return self.repos.bridge_connection_repo
+
+    @property
+    def memorylake_binding_repo(self) -> MemoryLakeBindingRepo:
+        return self.repos.memorylake_binding_repo
+
+    @property
+    def memorylake_submission_repo(self) -> MemoryLakeSubmissionRepo:
+        return self.repos.memorylake_submission_repo
 
     @property
     def connector_repo(self) -> ConnectorRepo:

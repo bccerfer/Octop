@@ -1,18 +1,18 @@
-"""Unregistered read execution boundary with invocation-time authorization.
+"""Read execution boundary with invocation-time authorization.
 
-Storage and authenticated caller adapters are intentionally not supplied here.
-The service owns one runner and admission lock per connection; callers must not
-share its private runner. No writes, retries, tool registration or native-memory
+Storage and authenticated caller adapters are supplied by trusted composition.
+The service owns a private runner. Production factories must inject the same
+server-owned ReadAdmission into independent per-turn service instances. No writes, retries, tool registration or native-memory
 changes happen in this module.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from octop.infra.connectors.memorylake.admission import ReadAdmission
 from octop.infra.connectors.memorylake.contract import CallerContext, ReadScope, plan_read
 from octop.infra.connectors.memorylake.results import normalize_read_result
 from octop.infra.connectors.memorylake.runner import MemoryLakeRunner, MemoryLakeRunnerError
@@ -35,7 +35,10 @@ def _redact(value: object, secret: str) -> object:
     if isinstance(value, list):
         return [_redact(item, secret) for item in value]
     if isinstance(value, dict):
-        return {str(key).replace(secret, "[redacted]"): _redact(item, secret) for key, item in value.items()}
+        return {
+            str(key).replace(secret, "[redacted]"): _redact(item, secret)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -74,16 +77,27 @@ class MemoryLakeReadService:
         executable: Path,
         load_connection: Callable[[], Awaitable[ReadConnection]],
         load_credentials: Callable[[], Awaitable[ReadCredentials]],
+        admission: ReadAdmission | None = None,
+        check_invocation: Callable[[], None] | None = None,
+        admit_result: Callable[[ReadConnection, CallerContext], Awaitable[None]] | None = None,
     ) -> None:
         self._connector_id = connector_id
         self._load_connection = load_connection
         self._load_credentials = load_credentials
+        self._check_invocation = check_invocation
+        self._admit_result = admit_result
         self._runner = MemoryLakeRunner(executable)
-        self._admission = asyncio.Lock()
+        # Compatibility-only fallback: isolated instances cannot coordinate turns.
+        # Production factories must pass a server-owned shared admission object.
+        self._admission = admission if admission is not None else ReadAdmission(max_active=1)
 
     async def _current_connection(self) -> ReadConnection:
         try:
+            if self._check_invocation is not None:
+                self._check_invocation()
             connection = await self._load_connection()
+            if self._check_invocation is not None:
+                self._check_invocation()
         except Exception:
             raise MemoryLakeReadError("connection_unavailable") from None
         if not isinstance(connection, ReadConnection):
@@ -107,7 +121,7 @@ class MemoryLakeReadService:
             key: tuple(value) if key == "project_ids" and isinstance(value, list) else value
             for key, value in arguments.items()
         }
-        async with self._admission:
+        async with self._admission.acquire(self._connector_id):
             connection = await self._current_connection()
             # Reject before touching credentials or materializing a private folder.
             plan_read(connection.scope, caller, operation, supplied)
@@ -180,6 +194,13 @@ class MemoryLakeReadService:
             # credential rotation, even though the remote request cannot be undone.
             if await self._current_connection() != connection:
                 raise MemoryLakeReadError("authorization_changed")
+            if self._admit_result is not None:
+                try:
+                    await self._admit_result(connection, caller)
+                except Exception:
+                    raise MemoryLakeReadError("material_admission_denied") from None
+            if self._check_invocation is not None:
+                self._check_invocation()
             return {
                 **response,
                 "connector_id": current.scope.connector_id,

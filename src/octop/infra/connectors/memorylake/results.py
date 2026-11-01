@@ -75,7 +75,8 @@ def _texts(payload: dict[str, object], keys: tuple[str, ...], budget: _Budget) -
 def _optional_ids(payload: dict[str, object], keys: tuple[str, ...]) -> dict[str, object]:
     return {
         key: _identifier(payload[key]) if payload[key] is not None else None
-        for key in keys if key in payload
+        for key in keys
+        if key in payload
     }
 
 
@@ -96,7 +97,9 @@ def _numbers(payload: dict[str, object]) -> dict[str, object]:
     return result
 
 
-def _fact(payload: dict[str, object], actor_id: str, budget: _Budget, expected_id: str | None = None) -> dict[str, object]:
+def _fact(
+    payload: dict[str, object], actor_id: str, budget: _Budget, expected_id: str | None = None
+) -> dict[str, object]:
     identifier = _identifier(payload.get("id"))
     if expected_id is not None and identifier != expected_id:
         raise ValueError("result_id_mismatch")
@@ -129,22 +132,34 @@ def _block(payload: dict[str, object], budget: _Budget) -> dict[str, object]:
             chunks = []
             for raw in budget.collection(highlight.get("chunks")):
                 chunk = _object(raw)
-                chunks.append({**_optional_ids(chunk, ("id",)), **_texts(chunk, ("text", "range"), budget)})
+                chunks.append(
+                    {**_optional_ids(chunk, ("id",)), **_texts(chunk, ("text", "range"), budget)}
+                )
             result["highlight"] = {"chunks": chunks}
     return result
 
 
-def _document(payload: dict[str, object], projects: tuple[str, ...], budget: _Budget) -> dict[str, object]:
+def _document(
+    payload: dict[str, object], projects: tuple[str, ...], budget: _Budget
+) -> dict[str, object]:
     result: dict[str, object] = {"document_id": _identifier(payload.get("document_id"))}
     if "project_id" in payload:
         project = payload["project_id"]
         if project is not None and _identifier(project) not in projects:
             raise ValueError("result_scope_mismatch")
         result["project_id"] = project
-    result.update(_texts(payload, ("document_name", "file_name", "document_summary", "source_type", "sheet_name"), budget))
+    result.update(
+        _texts(
+            payload,
+            ("document_name", "file_name", "document_summary", "source_type", "sheet_name"),
+            budget,
+        )
+    )
     result.update(_numbers({key: payload[key] for key in ("rank",) if key in payload}))
     if "items" in payload:
-        result["items"] = [_block(_object(item), budget) for item in budget.collection(payload["items"])]
+        result["items"] = [
+            _block(_object(item), budget) for item in budget.collection(payload["items"])
+        ]
     return result
 
 
@@ -152,7 +167,9 @@ def _trace_entry(payload: dict[str, object], budget: _Budget) -> dict[str, objec
     result = _texts(payload, ("event", "timestamp", "source_kind", "old_fact", "new_fact"), budget)
     result.update(_optional_ids(payload, ("history_id", "conversation_id", "source_event_id")))
     if "source_entry_ids" in payload:
-        result["source_entry_ids"] = [_identifier(value) for value in budget.collection(payload["source_entry_ids"])]
+        result["source_entry_ids"] = [
+            _identifier(value) for value in budget.collection(payload["source_entry_ids"])
+        ]
     return result
 
 
@@ -170,7 +187,13 @@ def normalize_read_result(
     are malformed, not zero matches. Optional scope/rank/citations stay absent;
     nested fields are allowlisted and bounded, with no lossy text truncation.
     """
-    if operation not in {"search_documents", "search_facts", "get_document", "get_fact", "trace_fact"}:
+    if operation not in {
+        "search_documents",
+        "search_facts",
+        "get_document",
+        "get_fact",
+        "trace_fact",
+    }:
         raise ValueError("unsupported_read_operation")
     scope: dict[str, object] = {}
     projects: tuple[str, ...] = ()
@@ -197,23 +220,44 @@ def normalize_read_result(
     budget = _Budget()
     data: dict[str, object]
     if operation == "search_documents":
-        data = {"documents": [_document(_object(item), projects, budget) for item in budget.collection(payload.get("documents"), _MAX_RESULTS)]}
+        data = {
+            "documents": [
+                _document(_object(item), projects, budget)
+                for item in budget.collection(payload.get("documents"), _MAX_RESULTS)
+            ]
+        }
     elif operation == "search_facts":
         assert actor_id is not None
-        data = {"facts": [_fact(_object(item), actor_id, budget) for item in budget.collection(payload.get("facts"), _MAX_RESULTS)]}
+        data = {
+            "facts": [
+                _fact(_object(item), actor_id, budget)
+                for item in budget.collection(payload.get("facts"), _MAX_RESULTS)
+            ]
+        }
     elif operation == "get_document":
         identifier = _identifier(payload.get("id"))
         if identifier != expected_id:
             raise ValueError("result_id_mismatch")
-        if payload.get("project_id") is not None and _identifier(payload["project_id"]) not in projects:
+        if (
+            payload.get("project_id") is not None
+            and _identifier(payload["project_id"]) not in projects
+        ):
             raise ValueError("result_scope_mismatch")
-        data = {"id": identifier, **_texts(payload, ("name", "status", "document_type", "created_at"), budget)}
+        data = {
+            "id": identifier,
+            **_texts(payload, ("name", "status", "document_type", "created_at"), budget),
+        }
     elif operation == "get_fact":
         assert actor_id is not None
         data = _fact(payload, actor_id, budget, expected_id)
     else:
         assert actor_id is not None
-        data = {"trace": [_trace_entry(_object(item), budget) for item in budget.collection(payload.get("trace"))]}
+        data = {
+            "trace": [
+                _trace_entry(_object(item), budget)
+                for item in budget.collection(payload.get("trace"))
+            ]
+        }
         if payload.get("fact") is not None:
             data["fact"] = _fact(_object(payload["fact"]), actor_id, budget, expected_id)
     return {"operation": operation, "request_scope": scope, "untrusted": True, "data": data}

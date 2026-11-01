@@ -13,6 +13,7 @@ import math
 import os
 import signal
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,10 +59,8 @@ async def _drain(
 
 
 def _kill_group(process: asyncio.subprocess.Process) -> None:
-    try:
+    with suppress(ProcessLookupError):
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
 
 
 async def _cleanup(

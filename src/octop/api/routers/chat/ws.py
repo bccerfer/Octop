@@ -84,9 +84,14 @@ async def dashboard_chat_ws(
             json.dumps(frame, ensure_ascii=False, default=json_chunk_default),
         )
 
-    hub.register(connection_id, send_frame)
-
     try:
+        # The server-generated connection is bound to verified chat identity,
+        # not a model-provided ID or generic dashboard notification socket.
+        # Native turns still enqueue ordinary InboundMessage. Registration can
+        # fail if shutdown occurred during accept; cleanup must still run.
+        hub.register_authenticated_chat(
+            connection_id, send_frame, user_id=user.id, agent_id=agent_id
+        )
         while websocket.application_state == WebSocketState.CONNECTED:
             raw = await websocket.receive_text()
             try:

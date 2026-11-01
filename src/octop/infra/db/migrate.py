@@ -1318,7 +1318,8 @@ def _ensure_connectors_v13_schema(db: DatabasePool) -> None:
             )
         return
 
-    if "shared" in _table_columns(db, "connectors"):
+    connector_columns = _table_columns(db, "connectors")
+    if "shared" in connector_columns:
         with db.connect() as conn:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_connectors_shared "
@@ -1376,6 +1377,15 @@ def _ensure_connectors_v13_schema(db: DatabasePool) -> None:
                 FROM connectors_legacy
                 """
             )
+            if "credential_revision" in connector_columns:
+                conn.execute(
+                    "ALTER TABLE connectors ADD COLUMN credential_revision INTEGER NOT NULL DEFAULT 0"
+                )
+                conn.execute(
+                    "UPDATE connectors SET credential_revision = "
+                    "(SELECT credential_revision FROM connectors_legacy "
+                    "WHERE connectors_legacy.instance_id = connectors.instance_id)"
+                )
             conn.execute("DROP TABLE connectors_legacy")
             conn.execute("CREATE INDEX idx_connectors_user ON connectors(user_id)")
             conn.execute(
@@ -1729,7 +1739,9 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
     """
     current = _current_version(db)
     max_version = _max_discovered_version(db.dialect)
-    if max_version <= 0 or current <= max_version:
+    # v25+ belongs to the current migration lineage, not the legacy squash.
+    # A newer watermark must survive physical-schema reconciliation.
+    if current >= 25 or max_version <= 0 or current <= max_version:
         return
     if db.dialect == "postgresql":
         # v7 SQL rebuilds tables with RENAME; re-applying it would copy integer
@@ -1819,6 +1831,93 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
 def _apply_postgresql_migration(conn: Any, sql: str) -> None:
     for stmt in _split_pg_sql(sql):
         conn.execute(stmt)
+
+
+def _ensure_memorylake_bindings_schema(db: DatabasePool, path: Path) -> None:
+    """Replay v25 without resetting live revisions.
+
+    Legacy partial databases may lack connectors (as supported by v13). The
+    binding table can still be declared in SQLite; no binding can be used until
+    its referenced identity tables exist. Do not fabricate connector rows.
+    """
+    statements = _split_pg_sql(path.read_text(encoding="utf-8"))
+    with db.transaction() as conn:
+        if db.dialect == "postgresql":
+            has_connectors = (
+                conn.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_name = ?",
+                    ("connectors",),
+                ).fetchone()
+                is not None
+            )
+            has_revision = (
+                has_connectors
+                and conn.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = ? "
+                    "AND column_name = ?",
+                    ("connectors", "credential_revision"),
+                ).fetchone()
+                is not None
+            )
+        else:
+            has_connectors = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='connectors'"
+                ).fetchone()
+                is not None
+            )
+            has_revision = has_connectors and any(
+                row["name"] == "credential_revision"
+                for row in conn.execute("PRAGMA table_info(connectors)").fetchall()
+            )
+        for statement in statements:
+            if statement.startswith("UPDATE _schema_version"):
+                continue
+            if (not has_connectors or has_revision) and (
+                statement.startswith("ALTER TABLE connectors")
+                or statement.startswith("UPDATE connectors SET credential_revision")
+            ):
+                continue
+            if statement.startswith("CREATE TABLE memorylake_bindings"):
+                statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+            conn.execute(statement)
+
+
+def _ensure_memorylake_submissions_schema(
+    db: DatabasePool, path: Path, *, advance_version: bool = False
+) -> None:
+    """Transactional v26 creation/repair; retain history and advanced watermarks.
+
+    SQLite executescript can commit before a later DDL failure. Execute each
+    statement within the pool transaction instead, including the normal version
+    bump. Restored partial/missing tables are recreated without resetting rows,
+    policy revisions, phases or leases. Existing malformed columns are not rebuilt.
+    """
+    with db.transaction() as conn:
+        for statement in _split_pg_sql(path.read_text(encoding="utf-8")):
+            if statement.startswith("UPDATE _schema_version"):
+                continue
+            if statement.startswith("CREATE TABLE "):
+                statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+            conn.execute(statement)
+        if advance_version:
+            conn.execute("UPDATE _schema_version SET version = 26 WHERE version < 26")
+
+
+def _ensure_memorylake_agent_admissions_schema(
+    db: DatabasePool, path: Path, *, advance_version: bool = False
+) -> None:
+    """Repair absent v27 table without erasing markers or lowering watermarks."""
+    with db.transaction() as conn:
+        for statement in _split_pg_sql(path.read_text(encoding="utf-8")):
+            if statement.startswith("UPDATE _schema_version"):
+                continue
+            statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+            conn.execute(statement)
+        if advance_version:
+            conn.execute("UPDATE _schema_version SET version = 27 WHERE version < 27")
 
 
 def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
@@ -1989,6 +2088,14 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
         _ensure_bridge_shared_schema(db)
         with db.connect() as conn:
             conn.execute("UPDATE _schema_version SET version = ?", (version,))
+        return
+    if version == 25:
+        _ensure_memorylake_bindings_schema(db, path)
+        with db.transaction() as conn:
+            conn.execute("UPDATE _schema_version SET version = 25 WHERE version < 25")
+        return
+    if version == 26:
+        _ensure_memorylake_submissions_schema(db, path, advance_version=True)
         return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
@@ -2184,8 +2291,17 @@ def _expand_page_tab_permissions(db: DatabasePool) -> None:
 def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
+        # Repair a folded/skipped v13 before v25 adds a referencing table.
+        if _current_version(db) >= 13:
+            _ensure_connectors_v13_schema(db)
     for version, path in _discover(db.dialect):
         if version <= _current_version(db):
+            continue
+        if version == 27:
+            _ensure_memorylake_agent_admissions_schema(db, path, advance_version=True)
+            continue
+        if version == 26:
+            _ensure_memorylake_submissions_schema(db, path, advance_version=True)
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.
@@ -2216,6 +2332,16 @@ def run_migrations(db: DatabasePool) -> None:
                 _ensure_knowledge_bases_schema(db)
         else:
             _apply_sqlite_migration(db, version, path)
+    # Restored databases can have a watermark ahead of their physical schema.
+    # Reconcile v25/v26 even when numbered migrations were skipped; never reset
+    # credentials, ledger evidence or an advanced version watermark.
+    for version, path in _discover(db.dialect):
+        if version == 25:
+            _ensure_memorylake_bindings_schema(db, path)
+        elif version == 26:
+            _ensure_memorylake_submissions_schema(db, path)
+        elif version == 27:
+            _ensure_memorylake_agent_admissions_schema(db, path)
     _reconcile_pre_squash_schema_version(db)
     _ensure_knowledge_bases_schema(db)
     _ensure_skill_packages_schema(db)

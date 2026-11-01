@@ -96,6 +96,10 @@ class WebSocketChannel(BaseChannel):
         # Never concatenate two dashboard user_turns (would look like 串流).
         return False
 
+    def _allows_continuation(self, message: InboundMessage) -> bool:
+        """Per-invocation policy; native turns retain their existing behavior."""
+        return True
+
     async def handle_inbound(self, raw_payload: Any) -> None:
         """Stream harness chunks to all thread subscribers (no delta batching).
 
@@ -103,6 +107,7 @@ class WebSocketChannel(BaseChannel):
         the same logical turn (issue #1300 soft interrupt at Octop boundaries).
         """
         message = self.parse_inbound(raw_payload)
+        allow_continuation = self._allows_continuation(message)
 
         if self._media_backend:
             await self._persist_media(message)
@@ -183,12 +188,17 @@ class WebSocketChannel(BaseChannel):
                 stream = processor.iter_turn_chunks(current)
                 async for chunk in stream:
                     chunk_type = str(chunk.get("type") or "") if isinstance(chunk, dict) else ""
+                    if not allow_continuation and chunk_type == "hitl_required":
+                        # Do not publish/park an unsupported resume grant. The
+                        # existing failed-turn cleanup discards pending steers.
+                        raise ValueError("channel_continuation_unsupported")
                     if preempted and chunk_type not in ("done", "error"):
                         # Cancel already landed at the tool boundary. Later
                         # tokens are not in the checkpoint — do not show them.
                         continue
                     if (
-                        not preempted
+                        allow_continuation
+                        and not preempted
                         and chunk_type in ("token", "tool_call_chunk")
                         and saw_tool_result
                         and self._steer.has_pending(thread_id)
@@ -233,7 +243,11 @@ class WebSocketChannel(BaseChannel):
                     break
                 await close_event_stream(stream)
                 stream = None
-                outcome = self._steer.drain_for_continuation(thread_id)
+                outcome = (
+                    self._steer.drain_for_continuation(thread_id)
+                    if allow_continuation
+                    else self._steer.discard(thread_id, reason="turn_cancelled")
+                )
                 if outcome is None:
                     break
                 if isinstance(outcome, DiscardBundle):

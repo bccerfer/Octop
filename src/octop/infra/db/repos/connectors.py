@@ -26,6 +26,7 @@ class ConnectorRow:
     config_json: str | None
     created_at: int
     updated_at: int
+    credential_revision: int = 0
 
     @classmethod
     def from_row(cls, r: DbRow) -> ConnectorRow:
@@ -45,6 +46,7 @@ class ConnectorRow:
             config_json=r["config_json"],
             created_at=r["created_at"],
             updated_at=r["updated_at"],
+            credential_revision=r["credential_revision"],
         )
 
     @property
@@ -237,7 +239,8 @@ class ConnectorRepo:
         with self._db.transaction() as conn:
             conn.execute(
                 "UPDATE connectors SET credential_blob = ?, credential_expires_at = ?, "
-                "credential_rotated_at = ?, updated_at = ? WHERE instance_id = ?",
+                "credential_rotated_at = ?, updated_at = ?, "
+                "credential_revision = credential_revision + 1 WHERE instance_id = ?",
                 (blob, expires_at, ts, ts, instance_id),
             )
 

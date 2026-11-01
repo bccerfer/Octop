@@ -1,13 +1,13 @@
-"""Unregistered file-submission domain, without production persistence/auth adapters.
+"""Unregistered file-submission domain, with a separate real-DB ledger adapter.
 
-Production gates: transactional ledger, authenticated approval UI, fresh identity
+Production gates: ledger lifecycle/identity ABA, authenticated approval UI, fresh identity
 loader, BackendWorkspace attachment adapter, and durable unknown-state recovery.
 The protocols are deliberately narrower than a CLI runner. No retries or deletes
 are performed; approval consumption must be atomic across processes and restarts.
 Ledger.begin_step is the authorization linearization point: one transaction must
 check live consent/identity/credentials and durably grant one bounded step lease.
 Revocation blocks later grants, not already granted leases or remote side effects.
-The fake ledger is not proof that a production transaction provides this guarantee.
+Fake-ledger tests alone do not prove this guarantee; real storage has separate tests.
 """
 
 from __future__ import annotations
@@ -20,16 +20,33 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
-from octop.infra.connectors.memorylake.contract import CallerContext, ReadScope, _authorize, _identifier
-from octop.infra.connectors.memorylake.documents import parse_document_result, parse_import_result, parse_upload_result
-from octop.infra.connectors.memorylake.runner import MemoryLakeCancelledError, MemoryLakeRunnerError, ProcessResult
+from octop.infra.connectors.memorylake.contract import (
+    CallerContext,
+    ReadScope,
+    _authorize,
+    _identifier,
+)
+from octop.infra.connectors.memorylake.documents import (
+    parse_document_result,
+    parse_import_result,
+    parse_upload_result,
+)
+from octop.infra.connectors.memorylake.runner import (
+    MemoryLakeCancelledError,
+    MemoryLakeRunnerError,
+    ProcessResult,
+)
 
-_APPROVED_BASE_URLS = frozenset({
-    "https://app.memorylake.ai/openapi/memorylake",
-    "https://app.memorylake.cn/openapi/memorylake",
-})
+_APPROVED_BASE_URLS = frozenset(
+    {
+        "https://app.memorylake.ai/openapi/memorylake",
+        "https://app.memorylake.cn/openapi/memorylake",
+    }
+)
 
-State = Literal["approved", "uploading", "uploaded", "importing", "processing", "ready", "failed", "unknown"]
+State = Literal[
+    "approved", "uploading", "uploaded", "importing", "processing", "ready", "failed", "unknown"
+]
 
 
 @dataclass(frozen=True)
@@ -40,6 +57,7 @@ class WriteBinding:
     base_url: str
     credential_revision: int
     writes_enabled: bool = False
+    policy_revision: int = 1
 
 
 @dataclass(frozen=True)
@@ -110,20 +128,30 @@ class SubmissionError(ValueError):
 
 class SubmissionCancelledError(asyncio.CancelledError):
     def __init__(self, evidence: SubmissionRecord) -> None:
-        super().__init__("submission_cancelled_unknown")
+        super().__init__(
+            "submission_cancelled_unknown"
+            if evidence.state == "unknown"
+            else "submission_cancelled_with_receipt"
+        )
         self.evidence = evidence
 
 
 class WorkspaceSource(Protocol):
     async def read(self, caller: CallerContext, attachment_id: str) -> FileSnapshot:
-        """Check attachment ownership and read through BackendWorkspace, not host paths."""
+        """Authorize one immutable snapshot, never a model-selected host path.
+
+        Existing workspace files must use BackendWorkspace with bounded reads;
+        a separately approved new-upload bytes source need not read a workspace.
+        """
         ...
 
 
 class SubmissionLedger(Protocol):
     async def approval(self, approval_id: str) -> Approval: ...
 
-    async def claim(self, approval_id: str, intent: SubmissionIntent, now: float) -> SubmissionRecord:
+    async def claim(
+        self, approval_id: str, intent: SubmissionIntent, now: float
+    ) -> SubmissionRecord:
         """Atomically validate exact intent, active/unexpired consent and consume once.
 
         Reject an already-consumed approval, including concurrent claims. Create
@@ -131,7 +159,9 @@ class SubmissionLedger(Protocol):
         """
         ...
 
-    async def begin_step(self, previous: SubmissionRecord, phase: Literal["uploading", "importing"], now: float) -> StepLease:
+    async def begin_step(
+        self, previous: SubmissionRecord, phase: Literal["uploading", "importing"], now: float
+    ) -> StepLease:
         """Atomically validate live approval, binding, agent rights and key revision.
 
         In the SAME transaction check exact intent, expiry, unrevoked approval,
@@ -158,8 +188,12 @@ class SubmissionTransport(Protocol):
     Never look up a different mutable endpoint or infer a target from CLI defaults.
     """
 
-    async def upload(self, binding: WriteBinding, snapshot: FileSnapshot, *, lease: StepLease) -> ProcessResult: ...
-    async def import_file(self, binding: WriteBinding, item_id: str, *, lease: StepLease) -> ProcessResult: ...
+    async def upload(
+        self, binding: WriteBinding, snapshot: FileSnapshot, *, lease: StepLease
+    ) -> ProcessResult: ...
+    async def import_file(
+        self, binding: WriteBinding, item_id: str, *, lease: StepLease
+    ) -> ProcessResult: ...
     async def get_document(self, binding: WriteBinding, document_id: str) -> ProcessResult: ...
 
 
@@ -195,6 +229,7 @@ class SubmissionService:
             or binding.base_url not in _APPROVED_BASE_URLS
             or type(binding.credential_revision) is not int
             or binding.credential_revision < 1
+            or (write and (type(binding.policy_revision) is not int or binding.policy_revision < 1))
             or (write and _identifier(binding.project_id) not in binding.scope.project_ids)
         ):
             raise SubmissionError("write_not_authorized")
@@ -202,7 +237,9 @@ class SubmissionService:
             _identifier(binding.library_parent_id)
         return binding
 
-    async def _prepare(self, caller: CallerContext, attachment_id: str) -> tuple[SubmissionIntent, FileSnapshot]:
+    async def _prepare(
+        self, caller: CallerContext, attachment_id: str
+    ) -> tuple[SubmissionIntent, FileSnapshot]:
         _identifier(attachment_id)
         binding = await self._binding(caller)
         try:
@@ -220,7 +257,14 @@ class SubmissionService:
             or any(char in snapshot.filename for char in "/\\\0\r\n:")
         ):
             raise SubmissionError("invalid_source_snapshot")
-        intent = SubmissionIntent(caller, binding, attachment_id, snapshot.filename, hashlib.sha256(snapshot.content).hexdigest(), len(snapshot.content))
+        intent = SubmissionIntent(
+            caller,
+            binding,
+            attachment_id,
+            snapshot.filename,
+            hashlib.sha256(snapshot.content).hexdigest(),
+            len(snapshot.content),
+        )
         return intent, snapshot
 
     async def prepare(self, caller: CallerContext, attachment_id: str) -> SubmissionIntent:
@@ -252,7 +296,9 @@ class SubmissionService:
         if self._clock() >= approval.expires_at:
             raise SubmissionError("approval_invalid")
 
-    async def _persist(self, previous: SubmissionRecord, updated: SubmissionRecord) -> SubmissionRecord:
+    async def _persist(
+        self, previous: SubmissionRecord, updated: SubmissionRecord
+    ) -> SubmissionRecord:
         updated = replace(updated, revision=previous.revision + 1)
         try:
             await self._ledger.save(previous, updated)
@@ -272,18 +318,36 @@ class SubmissionService:
             return replace(record, state="unknown")
         if record.state == "uploading":
             upload = parse_upload_result(result.returncode, stdout)
-            return replace(record, state="uploaded" if upload.state == "uploaded" else "unknown", item_id=upload.item_id)
+            return replace(
+                record,
+                state="uploaded" if upload.state == "uploaded" else "unknown",
+                item_id=upload.item_id,
+            )
         imported = parse_import_result(result.returncode, stdout)
-        matching = [item for item in imported.items if item.file_id == record.item_id and item.document_id]
+        matching = [
+            item for item in imported.items if item.file_id == record.item_id and item.document_id
+        ]
         document_id = matching[0].document_id if len(matching) == 1 else None
         import_accepted = (
-            imported.state == "accepted" and imported.complete_report and len(imported.items) == 1
-            and len(matching) == 1 and matching[0].result in ("success", "duplicate")
+            imported.state == "accepted"
+            and imported.complete_report
+            and len(imported.items) == 1
+            and len(matching) == 1
+            and matching[0].result in ("success", "duplicate")
         )
-        complete = result.returncode == 0 and import_accepted and not imported.requires_reconciliation
-        return replace(record, state="processing" if complete else "unknown", document_id=document_id, import_accepted=import_accepted)
+        complete = (
+            result.returncode == 0 and import_accepted and not imported.requires_reconciliation
+        )
+        return replace(
+            record,
+            state="processing" if complete else "unknown",
+            document_id=document_id,
+            import_accepted=import_accepted,
+        )
 
-    async def _send(self, record: SubmissionRecord, snapshot: FileSnapshot, lease: StepLease) -> SubmissionRecord:
+    async def _send(
+        self, record: SubmissionRecord, snapshot: FileSnapshot, lease: StepLease
+    ) -> SubmissionRecord:
         result = None
         cancelled = False
         failed = False
@@ -292,7 +356,9 @@ class SubmissionService:
                 result = await self._transport.upload(record.intent.binding, snapshot, lease=lease)
             else:
                 assert record.item_id is not None
-                result = await self._transport.import_file(record.intent.binding, record.item_id, lease=lease)
+                result = await self._transport.import_file(
+                    record.intent.binding, record.item_id, lease=lease
+                )
         except asyncio.CancelledError as error:
             cancelled = True
             if isinstance(error, MemoryLakeCancelledError):
@@ -306,9 +372,14 @@ class SubmissionService:
             updated = replace(updated, state="unknown")
         return await self._settle(record, updated, cancelled=cancelled)
 
-    async def _settle(self, record: SubmissionRecord, updated: SubmissionRecord, *, cancelled: bool) -> SubmissionRecord:
+    async def _settle(
+        self, record: SubmissionRecord, updated: SubmissionRecord, *, cancelled: bool
+    ) -> SubmissionRecord:
         """Finish post-write persistence even if cancellation arrives during save."""
-        async def durable(previous: SubmissionRecord, proposed: SubmissionRecord) -> SubmissionRecord:
+
+        async def durable(
+            previous: SubmissionRecord, proposed: SubmissionRecord
+        ) -> SubmissionRecord:
             nonlocal cancelled
             task = asyncio.create_task(self._persist(previous, proposed))
             while not task.done():
@@ -335,12 +406,17 @@ class SubmissionService:
                 raise SubmissionCancelledError(evidence) from None
             raise SubmissionError("ledger_unavailable", evidence) from None
 
-    async def submit(self, caller: CallerContext, attachment_id: str, approval_id: str) -> SubmissionRecord:
+    async def submit(
+        self, caller: CallerContext, attachment_id: str, approval_id: str
+    ) -> SubmissionRecord:
         _identifier(approval_id)
         intent, snapshot = await self._prepare(caller, attachment_id)
         await self._fresh(approval_id, intent)
         try:
             record = await self._ledger.claim(approval_id, intent, self._clock())
+        except SubmissionError:
+            # A committed transaction may carry newer recovery evidence.
+            raise
         except Exception:
             raise SubmissionError("approval_claim_denied") from None
         if (
@@ -371,22 +447,32 @@ class SubmissionService:
             return await self._settle(record, replace(record, state="unknown"), cancelled=True)
         return record
 
-    async def _begin_step(self, record: SubmissionRecord, phase: Literal["uploading", "importing"]) -> StepLease:
+    async def _begin_step(
+        self, record: SubmissionRecord, phase: Literal["uploading", "importing"]
+    ) -> StepLease:
         try:
             lease = await self._ledger.begin_step(record, phase, self._clock())
+        except SubmissionError:
+            # Never overwrite a committed-step recovery record with the prior CAS version.
+            raise
         except Exception:
             raise SubmissionError("step_not_authorized", record) from None
         expected = replace(record, state=phase, revision=record.revision + 1)
         if (
-            not isinstance(lease, StepLease) or lease.record != expected
-            or lease.phase != phase or lease.revision != expected.revision
+            not isinstance(lease, StepLease)
+            or lease.record != expected
+            or lease.phase != phase
+            or lease.revision != expected.revision
             or type(lease.expires_at) not in (int, float)
-            or not math.isfinite(lease.expires_at) or self._clock() >= lease.expires_at
+            or not math.isfinite(lease.expires_at)
+            or self._clock() >= lease.expires_at
         ):
             raise SubmissionError("invalid_step_lease", expected)
         return lease
 
-    async def _reconciliation_binding(self, caller: CallerContext, record: SubmissionRecord) -> WriteBinding:
+    async def _reconciliation_binding(
+        self, caller: CallerContext, record: SubmissionRecord
+    ) -> WriteBinding:
         current = await self._binding(caller, write=False)
         original = record.intent.binding
         if (
@@ -404,7 +490,9 @@ class SubmissionService:
             raise SubmissionError("submission_access_denied")
         # Read the original project using CURRENT credentials, even when writes
         # were disabled or a different currently authorized target was selected.
-        return replace(current, project_id=original.project_id, library_parent_id=original.library_parent_id)
+        return replace(
+            current, project_id=original.project_id, library_parent_id=original.library_parent_id
+        )
 
     async def check_status(self, caller: CallerContext, submission_id: str) -> SubmissionRecord:
         """One authorized read-only reconciliation, independent of write opt-in."""
@@ -417,7 +505,11 @@ class SubmissionService:
         if not isinstance(record, SubmissionRecord) or record.submission_id != submission_id:
             raise SubmissionError("submission_access_denied")
         binding = await self._reconciliation_binding(caller, record)
-        if record.state not in ("processing", "unknown", "ready", "failed") or record.document_id is None or not record.import_accepted:
+        if (
+            record.state not in ("processing", "unknown", "ready", "failed")
+            or record.document_id is None
+            or not record.import_accepted
+        ):
             raise SubmissionError("document_not_observable")
         if record.state in ("ready", "failed"):
             return record
@@ -427,7 +519,9 @@ class SubmissionService:
                 # Nonzero exit cannot distinguish permission denial from transient
                 # failure without machine-readable trusted codes. Stop, don't retry.
                 raise SubmissionError("status_query_failed")
-            receipt = parse_document_result(result.returncode, result.stdout.decode("utf-8"), record.document_id)
+            receipt = parse_document_result(
+                result.returncode, result.stdout.decode("utf-8"), record.document_id
+            )
         except MemoryLakeRunnerError as error:
             # Only the trusted transport's typed codes carry authorization meaning;
             # never infer it from arbitrary upstream bodies or generic exceptions.
@@ -453,6 +547,17 @@ class SubmissionService:
             raise SubmissionError("authorization_changed")
         return saved
 
+    async def authorize_result(self, caller: CallerContext, record: SubmissionRecord) -> None:
+        """Final read-only disclosure check for a trusted persisted receipt.
+
+        This grants no write or retry. Current read permissions must still cover
+        the original owner/connector/workspace/project. Write opt-out or a valid
+        credential rotation alone does not revoke independently valid read access.
+        """
+        if not isinstance(record, SubmissionRecord):
+            raise SubmissionError("submission_access_denied")
+        await self._reconciliation_binding(caller, record)
+
     async def poll_status(
         self,
         caller: CallerContext,
@@ -474,10 +579,13 @@ class SubmissionService:
         The injected clock/sleep are trusted test hooks, not model parameters.
         """
         if (
-            type(max_checks) is not int or not 1 <= max_checks <= 100
-            or type(timeout_s) not in (int, float) or not math.isfinite(timeout_s)
+            type(max_checks) is not int
+            or not 1 <= max_checks <= 100
+            or type(timeout_s) not in (int, float)
+            or not math.isfinite(timeout_s)
             or not 0 < timeout_s <= 300
-            or type(interval_s) not in (int, float) or not math.isfinite(interval_s)
+            or type(interval_s) not in (int, float)
+            or not math.isfinite(interval_s)
             or not 0.1 <= interval_s <= 30
         ):
             raise SubmissionError("invalid_poll_limits")

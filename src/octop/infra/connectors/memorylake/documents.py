@@ -126,8 +126,12 @@ def parse_import_result(returncode: int, stdout: str) -> ImportReceipt:
         for detail in details
         for key in ("drive_item_id", "document_id")
     )
-    incomplete = truncated or invalid_ids or any(
-        item.result in ("success", "duplicate") and item.document_id is None for item in items
+    incomplete = (
+        truncated
+        or invalid_ids
+        or any(
+            item.result in ("success", "duplicate") and item.document_id is None for item in items
+        )
     )
     return ImportReceipt(state, items, returncode != 0 or incomplete, not incomplete)
 

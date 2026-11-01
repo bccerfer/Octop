@@ -99,12 +99,31 @@ def assert_control_plane_database_empty(db_config: DatabaseConfig, paths: PathLa
         )
 
 
+def assert_memorylake_file_runtime_detached(server: OctopServer) -> None:
+    """No probe/config mutation or pool replacement while a file owner is attached.
+
+    A drained/detached owner also latches rejection through native teardown.
+    Even a closed owner retains repository bindings. Restart is required; this
+    guard does not detach resources, revoke approvals or delete persisted data.
+    """
+    if (
+        getattr(server, "memorylake_file_runtime", None) is not None
+        or getattr(server, "memorylake_file_runtime_stopping", False) is True
+    ):
+        raise OctopError(
+            ErrorCode.SLASH_BAD_ARGS,
+            "Restart before changing databases with an attached MemoryLake file runtime",
+            status=409,
+        )
+
+
 def rebind_control_plane(server: OctopServer) -> None:
     """Close the current pool, open from config, migrate, and retarget runtime repos.
 
     Only allowed while ``user_count == 0`` (first-run setup). Target DB must also
     be empty (greenfield); otherwise raise ``DATABASE_NOT_EMPTY`` without swapping.
     """
+    assert_memorylake_file_runtime_detached(server)
     if server.user_manager is None or server.services is None:
         raise OctopError(ErrorCode.INTERNAL_ERROR, "server not started")
     if server.user_manager.count() != 0:

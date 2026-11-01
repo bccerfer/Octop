@@ -653,6 +653,10 @@ class GlobalProcessor:
     # -- IM channel entry (MessageEvent stream) --------------------------------
 
     async def __call__(self, msg: InboundMessage) -> AsyncIterator[MessageEvent]:
+        from octop.infra.connectors.memorylake.origin import DashboardInbound  # noqa: PLC0415
+
+        if isinstance(msg, DashboardInbound):
+            raise ValueError("memorylake_production_lifecycle_unverified")
         from octop.infra.metrics import METRICS  # noqa: PLC0415
 
         METRICS.inc("messages_total")
@@ -966,6 +970,12 @@ class GlobalProcessor:
         IM channels use :meth:`__call__` → ``project_stream`` → ``MessageEvent``
         (e.g. DingTalk ``BaseChannel.handle_inbound``).
         """
+        from octop.infra.connectors.memorylake.origin import DashboardInbound  # noqa: PLC0415
+
+        # This prototype envelope MUST NOT enter history/observers, user-owner
+        # fallback, or HITL reconstruction before their lifecycle is verified.
+        if isinstance(msg, DashboardInbound):
+            raise ValueError("memorylake_production_lifecycle_unverified")
         from octop.infra.metrics import METRICS  # noqa: PLC0415
 
         METRICS.inc("messages_total")

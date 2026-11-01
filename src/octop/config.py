@@ -122,6 +122,50 @@ class CapabilitiesConfig:
 
 
 @dataclass(frozen=True)
+class MemoryLakeCliConfig:
+    """Optional operator input, not an attestation that an artifact is usable."""
+
+    enabled: bool = False
+    executable: str = ""
+    expected_version: str = ""
+    sha256: str = ""
+
+
+def _memorylake_cli_config(raw: object) -> MemoryLakeCliConfig:
+    """Validate data only; never discover, execute, or persist an executable."""
+    limits = {"executable": 4096, "expected_version": 128, "sha256": 64}
+
+    def valid(data: dict[str, Any]) -> bool:
+        return (
+            not (data.keys() - {"enabled", *limits})
+            and type(data.get("enabled", False)) is bool
+            and all(
+                isinstance(data.get(key, ""), str) and len(data.get(key, "")) <= limit
+                for key, limit in limits.items()
+            )
+        )
+
+    if not isinstance(raw, dict) or not valid(raw):
+        logger.warning("Invalid MemoryLake CLI configuration; feature disabled")
+        return MemoryLakeCliConfig()
+    data = dict(raw)
+    enabled = os.environ.get("OCTOP_MEMORYLAKE_CLI_ENABLED")
+    if enabled is not None:
+        if enabled not in {"true", "false", "1", "0"}:
+            logger.warning("Invalid MemoryLake CLI configuration; feature disabled")
+            return MemoryLakeCliConfig()
+        data["enabled"] = enabled in {"true", "1"}
+    for key in limits:
+        override = os.environ.get("OCTOP_MEMORYLAKE_CLI_" + key.upper())
+        if override is not None:
+            data[key] = override
+    if not valid(data):
+        logger.warning("Invalid MemoryLake CLI configuration; feature disabled")
+        return MemoryLakeCliConfig()
+    return MemoryLakeCliConfig(**data)
+
+
+@dataclass(frozen=True)
 class OctopConfig:
     bind_host: str = "127.0.0.1"
     port: int = 8088
@@ -143,6 +187,7 @@ class OctopConfig:
     capabilities: CapabilitiesConfig = field(default_factory=CapabilitiesConfig)
     max_upload_mb: int = DEFAULT_MAX_UPLOAD_MB
     browser_idle_timeout_minutes: int = DEFAULT_BROWSER_IDLE_TIMEOUT_MINUTES
+    memorylake_cli: MemoryLakeCliConfig = field(default_factory=MemoryLakeCliConfig)
 
     @property
     def max_upload_bytes(self) -> int:
@@ -152,6 +197,8 @@ class OctopConfig:
 def _defaults_for_file() -> dict[str, Any]:
     data = asdict(OctopConfig())
     data.pop("database_in_file", None)
+    # Keep this opt-in subsection absent from newly generated native defaults.
+    data.pop("memorylake_cli", None)
     db = dict(data["database"])
     db.pop("password", None)
     db.pop("url", None)
@@ -617,6 +664,7 @@ def load_config(path: Path) -> OctopConfig:
         require_setup_password=bool(merged["require_setup_password"]),
         database=parse_database_config(merged_db),
         database_in_file=database_in_file,
+        memorylake_cli=_memorylake_cli_config(raw.get("memorylake_cli", {})),
         tls=_parse_tls_section(raw.get("tls")),
         backup=backup,
         capabilities=capabilities,

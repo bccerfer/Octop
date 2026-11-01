@@ -41,6 +41,8 @@ if TYPE_CHECKING:
     from octop.infra.auth.ldap.service import LdapAuthService
     from octop.infra.auth.ldap.throttle import LdapBindThrottle
     from octop.infra.auth.sso.service import SsoService
+    from octop.infra.connectors.memorylake.application import MemoryLakeApplication
+    from octop.infra.connectors.memorylake.file_runtime import MemoryLakeFileRuntime
     from octop.infra.db.services import SharedServices
     from octop.infra.history.trajectory.service import TrajectoryService
 
@@ -327,11 +329,68 @@ class OctopServer:
         self.plugin_manager: PluginManager | None = None
         self.wizard_tokens = WizardTokenStore(ttl_seconds=300)
         self._started = False
+        # Optional lifecycle slots; default-disabled deployments create no resources.
+        self._memorylake_application: MemoryLakeApplication | None = None
+        self._memorylake_file_runtime: MemoryLakeFileRuntime | None = None
+        self._memorylake_file_stopping = False
         self._started_at: int | None = None
         self._sso_service: SsoService | None = None
         self._ldap_service: LdapAuthService | None = None
         self._ldap_bind_throttle: LdapBindThrottle | None = None
         self._ldap_bind_throttle_services: SharedServices | None = None
+
+    @property
+    def memorylake_application(self) -> MemoryLakeApplication | None:
+        return self._memorylake_application
+
+    async def _start_memorylake_application(self) -> None:
+        """Optional local CLI owner; never block native boot on artifact probing."""
+        if (
+            self.services is None
+            or not self.database_bound
+            or self.services.config.memorylake_cli.enabled is not True
+            or self._memorylake_file_runtime is not None
+        ):
+            return
+        from octop.infra.connectors.memorylake.application import MemoryLakeApplication
+
+        application = MemoryLakeApplication(self)
+        try:
+            self.attach_memorylake_file_runtime(application.runtime)
+            self._memorylake_application = application
+            application.start()
+        except Exception:
+            application.close()
+            await application.runtime.aclose()
+            if self._memorylake_file_runtime is application.runtime:
+                self._memorylake_file_runtime = None
+            self._memorylake_application = None
+            logger.warning("Optional MemoryLake application unavailable")
+
+    @property
+    def memorylake_file_runtime(self) -> MemoryLakeFileRuntime | None:
+        return self._memorylake_file_runtime
+
+    @property
+    def memorylake_file_runtime_stopping(self) -> bool:
+        """Latch for a formerly attached owner, retained until the next start."""
+        return self._memorylake_file_stopping
+
+    def attach_memorylake_file_runtime(self, runtime: MemoryLakeFileRuntime) -> None:
+        """Trusted singleton wiring only; no factory, authentication or ingress.
+
+        The trusted composition root chooses the authorizer and limits.
+        Replacement/hot-DB-swap is not supported while this owner is attached.
+        """
+        if (
+            not self._started
+            or not self.database_bound
+            or self._memorylake_file_stopping
+            or self._memorylake_file_runtime is not None
+            or runtime.closed
+        ):
+            raise ValueError("memorylake_file_runtime_not_attachable")
+        self._memorylake_file_runtime = runtime
 
     # Backward compat: expose user_manager directly
     @property
@@ -397,6 +456,7 @@ class OctopServer:
     async def start(self) -> None:
         if self._started:
             return
+        self._memorylake_file_stopping = False
         self.paths.ensure_root()
         # fnOS/容器内非 root 用户场景：把用户级 npm 全局 bin 目录（~/.npm-global）
         # 纳入进程 PATH，保证连接器 CLI（wecom-cli / lark-cli）可被检测与调用。
@@ -453,6 +513,7 @@ class OctopServer:
         self._started = True
         assert self.user_manager is not None
         self._emit_wizard_password(user_count=self.user_manager.count())
+        await self._start_memorylake_application()
 
     async def bind_control_plane(self) -> None:
         """Open the configured control-plane DB and boot runtime (first-run wizard).
@@ -477,6 +538,7 @@ class OctopServer:
         boot_from_services(self.services.settings_repo, self.services.secret_repo)
         self._ensure_jwt_secret()
         await self._boot_runtime(config)
+        await self._start_memorylake_application()
         logger.info(
             "control-plane database bound driver=%s",
             config.database.driver,
@@ -756,6 +818,32 @@ class OctopServer:
     async def stop(self) -> None:
         if not self._started:
             return
+        memorylake_cancelled = False
+        application = self._memorylake_application
+        if application is not None:
+            application.close()
+        file_runtime = self._memorylake_file_runtime
+        if file_runtime is not None:
+            # Keep the rebind guard active after detaching this drained owner,
+            # including awaits/errors in native teardown. Default None is inert.
+            self._memorylake_file_stopping = True
+            # This guard is deliberately OUTSIDE the existing DB-closing finally:
+            # an unsuccessful drain must not close a pool still used by a worker.
+            try:
+                file_runtime.close()
+                if application is not None:
+                    memorylake_cancelled = await application.settle_readiness()
+                await file_runtime.aclose()
+            except asyncio.CancelledError:
+                if not file_runtime.drained:
+                    raise
+                memorylake_cancelled = True
+            except Exception:
+                raise RuntimeError("memorylake_file_runtime_shutdown_failed") from None
+            if not file_runtime.drained:
+                raise RuntimeError("memorylake_file_runtime_not_drained")
+            self._memorylake_file_runtime = None
+            self._memorylake_application = None
         try:
             from octop.infra.connectors.gateway import agently_auth
 
@@ -779,6 +867,10 @@ class OctopServer:
             self.app_runtime = None
             self._started = False
             logger.info("octop server stopped")
+        if memorylake_cancelled:
+            # Preserve caller cancellation only after owned work and the normal
+            # native teardown have completed; no worker was force-stopped.
+            raise asyncio.CancelledError("server_stopped_after_memorylake_drain")
 
     # ----- helpers -----
 
